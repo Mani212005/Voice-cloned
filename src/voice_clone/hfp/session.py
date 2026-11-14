@@ -141,6 +141,9 @@ class HfSession:
     def audio_closed(self) -> None:
         self._run_call_actions(self.calls.on_audio_closed())
 
+    def audio_failed(self) -> None:
+        self._run_call_actions(self.calls.on_audio_failed())
+
     def conversation_done(self) -> None:
         self._run_call_actions(self.calls.on_conversation_done())
 

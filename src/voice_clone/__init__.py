@@ -75,9 +75,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.hfp_command == "cleanup":
         import time
 
-        from .hfp.store import CallStore
+        from .hfp.store import CallStore, StoreError
 
-        removed = CallStore(args.calls_dir).cleanup(time.time())
+        try:
+            removed = CallStore(args.calls_dir).cleanup(time.time())
+        except StoreError as exc:
+            print(exc, file=sys.stderr)
+            return 2
         print(f"deleted {len(removed)} file(s) from {args.calls_dir}")
         return 0
 

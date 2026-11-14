@@ -118,13 +118,18 @@ class HfpConnection:
             self._timer.cancel()
         with contextlib.suppress(ValueError, OSError):
             self.loop.remove_reader(self.rfcomm.fileno())
-        self.session.link_lost()
-        self._pump(writes=False)
-        self._close_sco()
-        self.rfcomm.close()
-        log.info("%s: hands-free link closed", self.address)
-        if self.on_closed:
-            self.on_closed(self)
+        try:
+            self.session.link_lost()
+            self._pump(writes=False)
+        except Exception:
+            log.exception("%s: ending the call after the link was lost failed", self.address)
+        finally:
+            # Whatever went wrong above, nothing of the call may outlive the link.
+            self._release_call_audio()
+            self.rfcomm.close()
+            log.info("%s: hands-free link closed", self.address)
+            if self.on_closed:
+                self.on_closed(self)
 
     # ----- RFCOMM -------------------------------------------------------------------
 
@@ -166,7 +171,11 @@ class HfpConnection:
                         self.loop.call_soon(self.close)
                         break
             for action in actions:
-                self._perform(action)
+                try:
+                    self._perform(action)
+                except Exception:
+                    # One failing action must not skip the actions that release the call.
+                    log.exception("%s: %s failed", self.address, type(action).__name__)
         self._schedule()
 
     def _schedule(self) -> None:
@@ -196,6 +205,7 @@ class HfpConnection:
                 self.loop.call_soon(self.close)
             case CodecSelected(codec=codec):
                 log.info("%s: phone selected codec %s", self.address, _codec_name(codec))
+                self._codec_selected(codec)
             case StartConversation(record=record):
                 self._start_conversation(record)
             case ConnectAudio():
@@ -208,14 +218,34 @@ class HfpConnection:
     def _start_conversation(self, record: CallRecord) -> None:
         self.record = record
         log.info("%s: AI answered caller %s", self.address, redact(record.number))
-        self._begin_conversation()
+        self._begin_conversation_or_hang_up()
+
+    def _begin_conversation_or_hang_up(self) -> bool:
+        try:
+            self._begin_conversation()
+        except Exception:
+            # No recording or prompts means no call: release the audio and hang up.
+            log.exception("%s: could not start the conversation", self.address)
+            self._release_call_audio()
+            self._audio_failed()
+            return False
+        return True
 
     def _begin_conversation(self) -> None:
         """Start recording and prompts once the call is answered and the audio link exists,
         so the sample rate is the one the link actually carries."""
-        if self.record is None or self.link is None or self.conversation is not None:
+        if self.record is None or self.link is None:
             return
         rate = self.link.rate
+        if self.conversation is not None:
+            if self.conversation.rate == rate:
+                return
+            # The phone changed codec mid-call: the old recording is at the wrong rate.
+            log.warning(
+                "%s: call audio changed to %d Hz, restarting the message", self.address, rate
+            )
+            self.record.notes.append(f"call audio changed to {rate} Hz; recording restarted")
+            self._close_conversation()
         path = self.store.audio_path(self.record.call_id)
         self.store.ensure()
         self.sink = audio.WavSink(path, rate)
@@ -227,25 +257,29 @@ class HfpConnection:
             [self.sink.write, *self.settings.audio_hooks],
         )
 
+    def _close_conversation(self) -> None:
+        """Drop the conversation and flush and close its recording, even if closing fails."""
+        self.conversation = None
+        sink, self.sink = self.sink, None
+        if sink is not None:
+            sink.close()
+
     def _stop_conversation(self, reason: Outcome) -> None:
         log.info("%s: conversation stopped (%s)", self.address, reason)
-        self.conversation = None
-        if self.sink:
-            self.sink.close()
-            self.sink = None
-        if reason != Outcome.USER_TOOK_OVER:
-            self._close_sco()
+        self._release_call_audio()
 
     def _call_finished(self, record: CallRecord) -> None:
         log.info(
             "%s: call from %s finished: %s", self.address, redact(record.number), record.outcome
         )
-        audio_path = self.store.audio_path(record.call_id)
-        extra: dict[str, object] = {"phone": self.address}
-        if audio_path.exists():
-            extra["audio"] = str(audio_path)
-        self.store.save_record(record, extra)
-        self.record = None
+        try:
+            audio_path = self.store.audio_path(record.call_id)
+            extra: dict[str, object] = {"phone": self.address}
+            if audio_path.exists():
+                extra["audio"] = str(audio_path)
+            self.store.save_record(record, extra)
+        finally:
+            self.record = None
 
     def _wideband_active(self) -> bool:
         return self.settings.wideband and self.session.codec == at.CODEC_MSBC
@@ -273,6 +307,20 @@ class HfpConnection:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def _codec_selected(self, codec: int) -> None:
+        """The phone (re)negotiated the codec: audio opened for the old one cannot be reused.
+
+        The phone opens a new audio connection for the new codec; release the old one now
+        so its codec state and socket are not held, and so the new one is accepted.
+        """
+        link = self.link
+        if link is None:
+            return
+        wanted = audio.WIDEBAND_RATE if codec == at.CODEC_MSBC else audio.NARROWBAND_RATE
+        if link.rate != wanted:
+            log.info("%s: codec changed, releasing the old call audio", self.address)
+            self._close_sco()
+
     # ----- SCO ----------------------------------------------------------------------
 
     def accepts_sco(self) -> bool:
@@ -285,19 +333,37 @@ class HfpConnection:
         if self.sco_sock is not None or not self.accepts_sco():
             sock.close()
             return
-        sock.setblocking(False)
+        try:
+            sock.setblocking(False)
+            link = MsbcLink() if self._wideband_active() else CvsdLink()
+        except Exception:
+            log.exception("%s: could not set up call audio", self.address)
+            sock.close()
+            self._audio_failed()
+            return
         self.sco_sock = sock
+        self.link = link
         self.sco_mtu = sco.mtu(sock)
-        self.link = MsbcLink() if self._wideband_active() else CvsdLink()
         log.info(
             "%s: call audio connected (%s, MTU %d)",
             self.address,
-            "mSBC 16 kHz" if isinstance(self.link, MsbcLink) else "CVSD 8 kHz",
+            "mSBC 16 kHz" if isinstance(link, MsbcLink) else "CVSD 8 kHz",
             self.sco_mtu,
         )
-        self.loop.add_reader(sock.fileno(), self._on_sco_readable)
-        self._begin_conversation()
+        try:
+            self.loop.add_reader(sock.fileno(), self._on_sco_readable)
+        except Exception:
+            log.exception("%s: could not watch the call audio", self.address)
+            self._release_call_audio()
+            self._audio_failed()
+            return
+        if not self._begin_conversation_or_hang_up():
+            return
         self.session.audio_connected()
+        self._pump()
+
+    def _audio_failed(self) -> None:
+        self.session.audio_failed()
         self._pump()
 
     def _on_sco_readable(self) -> None:
@@ -336,14 +402,38 @@ class HfpConnection:
             self._pump()
 
     def _close_sco(self) -> None:
-        sock = self.sco_sock
-        if sock is None:
-            return
+        """Release the SCO socket and the codec state tied to it; safe to call twice."""
+        sock, link = self.sco_sock, self.link
         self.sco_sock = None
         self.link = None
-        with contextlib.suppress(ValueError, OSError):
-            self.loop.remove_reader(sock.fileno())
-        sock.close()
+        try:
+            if link is not None:
+                link.close()
+        finally:
+            if sock is not None:
+                with contextlib.suppress(ValueError, OSError):
+                    self.loop.remove_reader(sock.fileno())
+                sock.close()
+
+    def _release_call_audio(self) -> None:
+        """Everything the call holds besides the RFCOMM link, released in a fixed order.
+
+        Each step runs even if an earlier one fails, so no path leaves a pending connect,
+        an open recording, a socket or codec state behind.
+        """
+        try:
+            self._cancel_audio_tasks()
+        finally:
+            try:
+                self._close_conversation()
+            finally:
+                self._close_sco()
+
+    def _cancel_audio_tasks(self) -> None:
+        me = asyncio.current_task(self.loop)
+        for task in list(self._tasks):
+            if task is not me:
+                task.cancel()
 
 
 def _codec_name(codec: int) -> str:

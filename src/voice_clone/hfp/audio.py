@@ -110,20 +110,29 @@ class WavSink:
     def __init__(self, path: Path, rate: int) -> None:
         self.path = path
         self.rate = rate
-        self._wav = wave.open(str(path), "wb")  # noqa: SIM115 - closed in close()
+        self._wav: wave.Wave_write | None = wave.open(str(path), "wb")  # noqa: SIM115
         self._wav.setnchannels(1)
         self._wav.setsampwidth(SAMPLE_WIDTH)
         self._wav.setframerate(rate)
         self.frames = 0
 
+    @property
+    def closed(self) -> bool:
+        return self._wav is None
+
     def write(self, pcm: bytes, rate: int) -> None:
+        if self._wav is None:
+            raise ValueError("sink is closed")
         if rate != self.rate:
             raise ValueError(f"sink is {self.rate} Hz, got {rate} Hz audio")
         self._wav.writeframes(pcm)
         self.frames += len(pcm) // SAMPLE_WIDTH
 
     def close(self) -> None:
-        self._wav.close()
+        """Patch the WAV header and close the file; safe to call more than once."""
+        wav, self._wav = self._wav, None
+        if wav is not None:
+            wav.close()
 
 
 class PcmSource:

@@ -237,4 +237,8 @@ class Daemon:
     async def _cleanup_loop(self) -> None:
         while True:
             await asyncio.sleep(CLEANUP_INTERVAL)
-            self.store.cleanup(self.clock.wall())
+            try:
+                self.store.cleanup(self.clock.wall())
+            except Exception:
+                # A failed round must not end the loop: recordings still expire next hour.
+                log.exception("call store cleanup failed")

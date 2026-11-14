@@ -45,6 +45,7 @@ class Outcome(enum.StrEnum):
     DENIED = "denied"
     ANSWER_FAILED = "answer_failed"
     LINK_LOST = "link_lost"
+    AUDIO_FAILED = "audio_failed"
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,8 @@ class CallMachine:
         self._audio_closed_at: float | None = None
         self._decision_done = False
         self._setup_ended_at: float | None = None
+        self._audio_failed = False
+        self._end_outcome = Outcome.MESSAGE_TAKEN
         self.callsetup_known = False
         self.call = 0
         self.callsetup = 0
@@ -179,6 +182,8 @@ class CallMachine:
         self._audio_closed_at = None
         self._decision_done = False
         self._setup_ended_at = None
+        self._audio_failed = False
+        self._end_outcome = Outcome.MESSAGE_TAKEN
         self._enter(Phase.IDLE)
         return actions
 
@@ -263,7 +268,7 @@ class CallMachine:
                     actions += self._finish(Outcome.CALLER_HUNG_UP)
             case Phase.HANGING_UP:
                 if name == "call" and value == 0:
-                    actions += self._finish(Outcome.MESSAGE_TAKEN)
+                    actions += self._finish(self._end_outcome)
             case Phase.USER_ACTIVE:
                 if name == "call" and value == 0:
                     self._enter(Phase.IDLE)
@@ -311,6 +316,20 @@ class CallMachine:
         if self.phase == Phase.AI_ACTIVE and was_connected and self.call == 1:
             self._audio_closed_at = self._now()
         return []
+
+    def on_audio_failed(self) -> list[CallAction]:
+        """The call audio could not be set up: hang up instead of leaving a dead line.
+
+        Before the AG reports the call active the hang-up waits for that report.
+        """
+        if self.record is None:
+            return []
+        if self.phase == Phase.ANSWERING:
+            self._audio_failed = True
+            return []
+        if self.phase != Phase.AI_ACTIVE:
+            return []
+        return self._hang_up_after_audio_failure()
 
     def on_conversation_done(self) -> list[CallAction]:
         if self.phase != Phase.AI_ACTIVE:
@@ -401,14 +420,23 @@ class CallMachine:
                     return [ConnectAudio()]
             case Phase.HANGING_UP:
                 if now - self._phase_started >= t.hangup_timeout:
-                    return self._finish(Outcome.MESSAGE_TAKEN)
+                    return self._finish(self._end_outcome)
         return []
 
     # ----- internal -------------------------------------------------------------------
 
+    def _hang_up_after_audio_failure(self) -> list[CallAction]:
+        assert self.record is not None
+        self.record.notes.append("call audio could not be set up")
+        self._end_outcome = Outcome.AUDIO_FAILED
+        self._enter(Phase.HANGING_UP)
+        return [StopConversation(Outcome.AUDIO_FAILED), SendHangup()]
+
     def _go_active(self) -> list[CallAction]:
         assert self.record is not None
         self.record.answered_wall = self.clock.wall()
+        if self._audio_failed:
+            return self._hang_up_after_audio_failure()
         self._enter(Phase.AI_ACTIVE)
         return [StartConversation(self.record)]
 

@@ -1,5 +1,7 @@
+import gc
 import wave
 
+import fake_sbc
 import numpy as np
 import pytest
 
@@ -182,3 +184,70 @@ def test_sco_sockaddr_round_trip_uses_kernel_byte_order():
     assert sco.unpack_sockaddr(packed) == "14:13:33:8B:27:B4"
     with pytest.raises(ValueError):
         sco.pack_sockaddr("14:13")
+
+
+# ----- codec lifecycle (fake libsbc, so it runs without the system library) ---------------
+
+
+@pytest.fixture
+def sbc(monkeypatch):
+    return fake_sbc.install(monkeypatch)
+
+
+def test_codec_close_releases_exactly_once(sbc):
+    encoder = msbc.MsbcEncoder()
+    assert sbc.live == {1}
+    encoder.close()
+    encoder.close()
+    assert sbc.finishes == 1 and not sbc.live
+    del encoder
+    gc.collect()
+    assert sbc.finishes == 1 and sbc.double_finishes == 0
+
+
+def test_codec_use_after_close_fails_loudly_instead_of_touching_freed_state(sbc):
+    encoder = msbc.MsbcEncoder()
+    decoder = msbc.MsbcDecoder()
+    encoder.close()
+    decoder.close()
+    with pytest.raises(RuntimeError, match="after close"):
+        encoder.encode(bytes(msbc.PCM_BYTES_PER_FRAME))
+    with pytest.raises(RuntimeError, match="after close"):
+        decoder.decode(bytes(msbc.MSBC_FRAME_BYTES))
+
+
+def test_codec_that_fails_to_initialise_holds_nothing(sbc):
+    sbc.fail_init_numbers = {1}
+    with pytest.raises(RuntimeError, match="sbc_init_msbc"):
+        msbc.MsbcEncoder()
+    gc.collect()
+    assert sbc.finishes == 0 and not sbc.live
+
+
+def test_dropping_a_codec_without_close_still_releases_it(sbc):
+    msbc.MsbcDecoder()
+    gc.collect()
+    assert sbc.finishes == 1 and not sbc.live
+
+
+def test_msbc_link_close_releases_encoder_and_decoder(sbc):
+    link = MsbcLink()
+    assert len(sbc.live) == 2
+    link.close()
+    link.close()
+    assert not sbc.live and sbc.finishes == 2 and sbc.double_finishes == 0
+    with pytest.raises(RuntimeError, match="after close"):
+        link.outgoing(48, bytes)
+
+
+def test_msbc_link_that_cannot_build_its_decoder_releases_its_encoder(sbc):
+    sbc.fail_init_numbers = {2}
+    with pytest.raises(RuntimeError):
+        MsbcLink()
+    assert not sbc.live and sbc.finishes == 1
+
+
+def test_cvsd_link_close_is_a_no_op():
+    link = CvsdLink()
+    link.close()
+    assert link.incoming(b"\x01\x00\x02") == b"\x01\x00"
