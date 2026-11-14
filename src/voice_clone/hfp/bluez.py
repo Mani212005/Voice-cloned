@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 
 BLUEZ = "org.bluez"
 HFP_HF_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
+HFP_AG_UUID = "0000111f-0000-1000-8000-00805f9b34fb"
 PROFILE_PATH = "/org/voiceclone/hfp_hf"
 HFP_VERSION = 0x0107
 
