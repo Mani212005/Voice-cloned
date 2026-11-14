@@ -213,29 +213,18 @@ class Daemon:
 
     def _open_sco(self, address: str, transparent: bool) -> asyncio.Future[socket.socket]:
         assert self._loop is not None
-
-        async def connect() -> socket.socket:
-            sock = sco.connect_socket(self.adapter_address, transparent)
-            try:
-                await asyncio.get_running_loop().sock_connect(sock, sco.peer_address(address))
-            except OSError:
-                sock.close()
-                raise
-            return sock
-
-        return self._loop.create_task(connect())
+        return self._loop.create_task(sco.connect(self.adapter_address, address, transparent))
 
     def _on_sco_incoming(self) -> None:
         assert self.sco_listener is not None
         try:
-            child, peer = self.sco_listener.accept()
+            child, address = sco.accept(self.sco_listener)
         except BlockingIOError:
             return
         except OSError as exc:
             log.warning("SCO accept failed: %s", exc)
             return
-        address = peer.decode() if isinstance(peer, bytes) else str(peer)
-        conn = self.connections.get(address.upper())
+        conn = self.connections.get(address)
         if conn is None or not conn.accepts_sco():
             log.info("%s: refusing call audio (no AI call in progress)", address)
             child.close()

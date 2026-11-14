@@ -172,3 +172,13 @@ def test_msbc_link_produces_exact_packet_sizes():
         out += reply
     assert msbc.H2Reassembler().feed(out)  # what we send parses as H2 mSBC
     assert conv.received_samples == 4 * msbc.SAMPLES_PER_FRAME
+
+
+def test_sco_sockaddr_round_trip_uses_kernel_byte_order():
+    from voice_clone.hfp import sco
+
+    packed = sco.pack_sockaddr("14:13:33:8B:27:B4")
+    assert packed == bytes([31, 0, 0xB4, 0x27, 0x8B, 0x33, 0x13, 0x14])
+    assert sco.unpack_sockaddr(packed) == "14:13:33:8B:27:B4"
+    with pytest.raises(ValueError):
+        sco.pack_sockaddr("14:13")
