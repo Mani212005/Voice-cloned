@@ -18,7 +18,8 @@ Actions:
 
 Numbers are compared after removing spaces, dashes, dots and parentheses. A rule
 without a leading ``+`` also matches a number that ends with it, so ``9876543210``
-matches ``+919876543210``. Without any matching rule the action is ``ai``.
+matches ``+919876543210``. A caller number reported as international (+CLIP type 145)
+without a ``+`` is compared as if it had one. Without any matching rule the action is ``ai``.
 """
 
 from __future__ import annotations

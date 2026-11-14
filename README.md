@@ -28,6 +28,8 @@ uv run voice-clone hfp run                 # answer after 20 s of ringing
   file every caller gets the AI.
 - Call audio and records are kept only in `~/.local/share/voiceclone-calls`
   (owner-only permissions) and are deleted after 24 hours. Never commit them.
+  `--calls-dir` must be a dedicated directory: the daemon refuses one that holds other
+  files, and only ever deletes its own call files.
 - The shipped intro and beep are placeholder tones. Pass `--intro`/`--beep` WAV files
   (any rate, resampled to 8 or 16 kHz) to replace them.
 - `--wideband` offers mSBC 16 kHz through the system `libsbc.so.1`. Narrowband

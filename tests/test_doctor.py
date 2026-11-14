@@ -2,9 +2,7 @@ import voice_clone
 from voice_clone.hfp import doctor
 
 
-def test_doctor_command_reports_instead_of_crashing_when_bluez_is_unreachable(
-    monkeypatch, capsys
-):
+def test_doctor_command_reports_instead_of_crashing_when_bluez_is_unreachable(monkeypatch, capsys):
     async def no_bluez(adapter):
         raise OSError("no system bus")
 
