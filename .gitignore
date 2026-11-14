@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+# Private call audio, transcripts and records must never be committed.
+voiceclone-calls/
+**/voiceclone-calls/**
+data/voiceclone-data/
