@@ -31,7 +31,6 @@ log = logging.getLogger(__name__)
 
 BLUEZ = "org.bluez"
 HFP_HF_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
-HFP_AG_UUID = "0000111f-0000-1000-8000-00805f9b34fb"
 PROFILE_PATH = "/org/voiceclone/hfp_hf"
 HFP_VERSION = 0x0107
 
@@ -49,7 +48,6 @@ class DaemonConfig:
     calls_dir: Path
     adapter: str = "hci0"
     observe: bool = False
-    reconnect_interval: float = 60.0
 
 
 def address_from_path(device_path: str) -> str:
@@ -106,7 +104,7 @@ class Daemon:
             log.warning("libsbc.so.1 not found: wideband disabled, using CVSD only")
             self.config.settings.wideband = False
 
-        self.store.ensure()
+        self.store.claim()
         self.store.cleanup(self.clock.wall())
         self.bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
         try:
@@ -124,12 +122,9 @@ class Daemon:
                 "observe only" if self.config.observe else "answer",
                 self.config.calls_dir,
             )
-            tasks = [asyncio.create_task(self._cleanup_loop())]
-            if self.config.reconnect_interval > 0:
-                tasks.append(asyncio.create_task(self._reconnect_loop()))
+            cleanup = asyncio.create_task(self._cleanup_loop())
             await self._stop.wait()
-            for task in tasks:
-                task.cancel()
+            cleanup.cancel()
         finally:
             await self._shutdown()
 
@@ -173,7 +168,6 @@ class Daemon:
                 "Version": Variant("q", HFP_VERSION),
                 "Features": Variant("q", features),
                 "RequireAuthentication": Variant("b", True),
-                "AutoConnect": Variant("b", True),
             },
         )
 
@@ -243,35 +237,3 @@ class Daemon:
         while True:
             await asyncio.sleep(CLEANUP_INTERVAL)
             self.store.cleanup(self.clock.wall())
-
-    async def _reconnect_loop(self) -> None:
-        """Reconnect paired, trusted phones that dropped the hands-free link."""
-        while True:
-            try:
-                await self._reconnect_once()
-            except (DBusError, OSError) as exc:
-                log.debug("reconnect pass failed: %s", exc)
-            await asyncio.sleep(self.config.reconnect_interval)
-
-    async def _reconnect_once(self) -> None:
-        manager = await self._interface("/", "org.freedesktop.DBus.ObjectManager")
-        objects = await manager.call_get_managed_objects()
-        prefix = f"/org/bluez/{self.config.adapter}/dev_"
-        for path, interfaces in objects.items():
-            device = interfaces.get("org.bluez.Device1")
-            if not path.startswith(prefix) or device is None:
-                continue
-            uuids = device.get("UUIDs", Variant("as", [])).value
-            paired = device.get("Paired", Variant("b", False)).value
-            trusted = device.get("Trusted", Variant("b", False)).value
-            address = address_from_path(path)
-            if HFP_AG_UUID not in uuids or not paired or not trusted:
-                continue
-            if address in self.connections:
-                continue
-            log.debug("%s: trying to reconnect the hands-free link", address)
-            proxy = await self._interface(path, "org.bluez.Device1")
-            try:
-                await proxy.call_connect_profile(HFP_AG_UUID)
-            except DBusError as exc:
-                log.debug("%s: reconnect failed: %s", address, exc)

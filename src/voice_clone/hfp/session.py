@@ -36,6 +36,13 @@ def _redact(line: str) -> str:
     return line
 
 
+def _caller_number(number: str, number_type: int | None) -> str | None:
+    """The +CLIP number in international form when the AG says so (type 145, no plus)."""
+    if number and number_type == at.NUMBER_TYPE_INTERNATIONAL and not number.startswith("+"):
+        return "+" + number
+    return number or None
+
+
 class SlcState(enum.StrEnum):
     CONNECTING = "connecting"
     READY = "ready"
@@ -185,8 +192,8 @@ class HfSession:
                     log.debug("unsolicited final result %s", result)
             case at.Ring():
                 self._run_call_actions(self.calls.on_ring())
-            case at.Clip(number=number):
-                self._run_call_actions(self.calls.on_clip(number or None))
+            case at.Clip(number=number, number_type=number_type):
+                self._run_call_actions(self.calls.on_clip(_caller_number(number, number_type)))
             case at.Ciev(index=index, value=value):
                 self._on_ciev(index, value)
             case at.Bcs(codec=codec):

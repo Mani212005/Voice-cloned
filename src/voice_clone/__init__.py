@@ -52,12 +52,6 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="never answer: only log the hands-free conversation (test plan step 2)",
     )
-    run.add_argument(
-        "--reconnect-interval",
-        type=float,
-        default=60.0,
-        help="seconds between reconnect attempts to paired phones, 0 to disable",
-    )
     run.add_argument("-v", "--verbose", action="store_true", help="log every AT line")
 
     doctor = hfp_sub.add_parser("doctor", help="read-only checks of Bluetooth readiness")
@@ -90,11 +84,17 @@ def main(argv: list[str] | None = None) -> int:
     from .hfp.bluez import Daemon, DaemonConfig
     from .hfp.connection import Settings
     from .hfp.policy import PolicyError, PolicyStore
+    from .hfp.store import CallStore, StoreError
 
     try:
         PolicyStore(args.policy).load()
     except PolicyError as exc:
         print(f"{args.policy}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        CallStore(args.calls_dir).claim()
+    except StoreError as exc:
+        print(exc, file=sys.stderr)
         return 2
     config = DaemonConfig(
         settings=Settings(
@@ -108,7 +108,6 @@ def main(argv: list[str] | None = None) -> int:
         calls_dir=args.calls_dir,
         adapter=args.adapter,
         observe=args.observe,
-        reconnect_interval=args.reconnect_interval,
     )
     asyncio.run(Daemon(config).run())
     return 0

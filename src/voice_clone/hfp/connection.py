@@ -207,19 +207,25 @@ class HfpConnection:
 
     def _start_conversation(self, record: CallRecord) -> None:
         self.record = record
-        rate = audio.WIDEBAND_RATE if self._wideband_active() else audio.NARROWBAND_RATE
+        log.info("%s: AI answered caller %s", self.address, redact(record.number))
+        self._begin_conversation()
+
+    def _begin_conversation(self) -> None:
+        """Start recording and prompts once the call is answered and the audio link exists,
+        so the sample rate is the one the link actually carries."""
+        if self.record is None or self.link is None or self.conversation is not None:
+            return
+        rate = self.link.rate
+        path = self.store.audio_path(self.record.call_id)
         self.store.ensure()
-        self.sink = audio.WavSink(self.store.audio_path(record.call_id), rate)
-        self.store.audio_path(record.call_id).chmod(0o600)
+        self.sink = audio.WavSink(path, rate)
+        path.chmod(0o600)
         self.conversation = Conversation(
             rate,
             self.prompts.at_rate(rate),
             self.settings.max_message,
             [self.sink.write, *self.settings.audio_hooks],
         )
-        log.info("%s: AI answered caller %s", self.address, redact(record.number))
-        if self.sco_sock is not None:
-            self.session.audio_connected()
 
     def _stop_conversation(self, reason: Outcome) -> None:
         log.info("%s: conversation stopped (%s)", self.address, reason)
@@ -290,6 +296,7 @@ class HfpConnection:
             self.sco_mtu,
         )
         self.loop.add_reader(sock.fileno(), self._on_sco_readable)
+        self._begin_conversation()
         self.session.audio_connected()
         self._pump()
 

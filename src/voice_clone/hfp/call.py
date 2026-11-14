@@ -63,6 +63,9 @@ class CallTimings:
     end_grace: float = 1.0
     """Some phones report callsetup=0 just before call=1; wait this long before
     concluding that the caller gave up."""
+    takeover_grace: float = 1.0
+    """When call audio closes during an AI call, wait this long for a +CIEV call=0 before
+    concluding that he moved the audio to the phone."""
 
 
 @dataclass
@@ -130,6 +133,7 @@ class CallMachine:
         self._phase_started = 0.0
         self._audio_connected = False
         self._audio_requested = False
+        self._audio_closed_at: float | None = None
         self._decision_done = False
         self._setup_ended_at: float | None = None
         self.callsetup_known = False
@@ -161,6 +165,8 @@ class CallMachine:
 
     def _finish(self, outcome: Outcome) -> list[CallAction]:
         actions: list[CallAction] = []
+        if self.phase in (Phase.ANSWERING, Phase.AI_ACTIVE, Phase.HANGING_UP):
+            actions.append(StopConversation(outcome))
         record = self.record
         if record is not None:
             record.outcome = outcome
@@ -170,6 +176,7 @@ class CallMachine:
         self._action = None
         self._audio_connected = False
         self._audio_requested = False
+        self._audio_closed_at = None
         self._decision_done = False
         self._setup_ended_at = None
         self._enter(Phase.IDLE)
@@ -253,7 +260,6 @@ class CallMachine:
                     self._setup_ended_at = self._now()
             case Phase.AI_ACTIVE:
                 if name == "call" and value == 0:
-                    actions.append(StopConversation(Outcome.CALLER_HUNG_UP))
                     actions += self._finish(Outcome.CALLER_HUNG_UP)
             case Phase.HANGING_UP:
                 if name == "call" and value == 0:
@@ -277,8 +283,6 @@ class CallMachine:
 
     def on_link_lost(self) -> list[CallAction]:
         actions: list[CallAction] = []
-        if self.phase in (Phase.ANSWERING, Phase.AI_ACTIVE, Phase.HANGING_UP):
-            actions.append(StopConversation(Outcome.LINK_LOST))
         if self.record is not None:
             actions += self._finish(Outcome.LINK_LOST)
         else:
@@ -296,18 +300,16 @@ class CallMachine:
 
     def on_audio_connected(self) -> list[CallAction]:
         self._audio_connected = True
+        self._audio_closed_at = None
         return []
 
     def on_audio_closed(self) -> list[CallAction]:
-        """The phone closed SCO. During an AI call that means he moved audio to the phone."""
+        """SCO closed. During an AI call that may mean he moved the audio to the phone;
+        ``tick`` decides once no +CIEV call=0 followed within ``takeover_grace``."""
         was_connected = self._audio_connected
         self._audio_connected = False
         if self.phase == Phase.AI_ACTIVE and was_connected and self.call == 1:
-            assert self.record is not None
-            actions: list[CallAction] = [StopConversation(Outcome.USER_TOOK_OVER)]
-            actions += self._finish(Outcome.USER_TOOK_OVER)
-            self._enter(Phase.USER_ACTIVE)
-            return actions
+            self._audio_closed_at = self._now()
         return []
 
     def on_conversation_done(self) -> list[CallAction]:
@@ -339,7 +341,9 @@ class CallMachine:
                 return min(candidates)
             case Phase.AI_ACTIVE:
                 candidates = [self._phase_started + t.max_call]
-                if not self._audio_connected and not self._audio_requested:
+                if self._audio_closed_at is not None:
+                    candidates.append(self._audio_closed_at + t.takeover_grace)
+                elif not self._audio_connected and not self._audio_requested:
                     candidates.append(self._phase_started + t.audio_wait)
                 return min(candidates)
             case Phase.HANGING_UP:
@@ -381,7 +385,15 @@ class CallMachine:
                     self._enter(Phase.HANGING_UP)
                     return [StopConversation(Outcome.MESSAGE_TAKEN), SendHangup()]
                 if (
-                    not self._audio_connected
+                    self._audio_closed_at is not None
+                    and now - self._audio_closed_at >= t.takeover_grace
+                ):
+                    actions = self._finish(Outcome.USER_TOOK_OVER)
+                    self._enter(Phase.USER_ACTIVE)
+                    return actions
+                if (
+                    self._audio_closed_at is None
+                    and not self._audio_connected
                     and not self._audio_requested
                     and now - self._phase_started >= t.audio_wait
                 ):

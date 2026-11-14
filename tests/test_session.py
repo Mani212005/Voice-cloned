@@ -184,10 +184,55 @@ def test_he_takes_over_by_moving_audio_to_phone():
     ag.session.audio_connected()
     ag.session.audio_closed()
     ag._drain()
+    assert ag.session.calls.phase == Phase.AI_ACTIVE
+    assert not ag.take(StopConversation)
+    ag.advance(1)
     assert ag.take(StopConversation) == [StopConversation(Outcome.USER_TOOK_OVER)]
     assert outcome(ag).outcome == Outcome.USER_TOOK_OVER
     assert "AT+CHUP" not in ag.sent
     assert ag.session.calls.phase == Phase.USER_ACTIVE
+
+
+def test_audio_closing_just_before_caller_hangs_up_is_not_a_takeover():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.session.audio_connected()
+    ag.session.audio_closed()
+    ag._drain()
+    ag.advance(0.5)
+    ag.ciev("call", 0)
+    assert ag.take(StopConversation) == [StopConversation(Outcome.CALLER_HUNG_UP)]
+    assert outcome(ag).outcome == Outcome.CALLER_HUNG_UP
+    ag.advance(5)
+    assert not ag.take(StopConversation)
+
+
+def test_no_audio_request_while_a_takeover_is_pending():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.advance(1)
+    ag.session.audio_connected()
+    ag.session.audio_closed()
+    ag._drain()
+    ag.advance(5)
+    assert not ag.take(ConnectAudio)
+
+
+def test_audio_reconnecting_cancels_the_takeover():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.session.audio_connected()
+    ag.session.audio_closed()
+    ag.advance(0.5)
+    ag.session.audio_connected()
+    ag.advance(5)
+    assert ag.session.calls.phase == Phase.AI_ACTIVE
 
 
 def test_answer_refused_by_phone():
@@ -203,6 +248,7 @@ def test_answer_without_call_active_report_times_out():
     ag.incoming_call()
     ag.advance(20)
     ag.advance(10)
+    assert ag.take(StopConversation) == [StopConversation(Outcome.ANSWER_FAILED)]
     assert outcome(ag).outcome == Outcome.ANSWER_FAILED
 
 
@@ -228,7 +274,60 @@ def test_max_call_length_hangs_up():
     ag.advance(120)
     assert ag.sent[-1] == "AT+CHUP"
     ag.advance(5)
+    assert StopConversation(Outcome.MESSAGE_TAKEN) in ag.take(StopConversation)
     assert outcome(ag).outcome == Outcome.MESSAGE_TAKEN
+
+
+def test_message_taken_stops_the_conversation():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.take(StartConversation)
+    ag.session.conversation_done()
+    ag._drain()
+    assert not ag.take(StopConversation)
+    ag.ciev("call", 0)
+    assert ag.take(StopConversation) == [StopConversation(Outcome.MESSAGE_TAKEN)]
+    assert outcome(ag).outcome == Outcome.MESSAGE_TAKEN
+
+
+def test_unanswered_hangup_still_stops_the_conversation():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.take(StartConversation)
+    ag.session.conversation_done()
+    ag._drain()
+    ag.advance(5)
+    assert ag.take(StopConversation) == [StopConversation(Outcome.MESSAGE_TAKEN)]
+    assert outcome(ag).outcome == Outcome.MESSAGE_TAKEN
+
+
+def test_international_number_without_plus_is_matched_as_international():
+    seen = []
+
+    def policy(number):
+        seen.append(number)
+        return Action.AI
+
+    ag = FakeAg(policy=policy).connect()
+    ag.ciev("callsetup", 1)
+    ag.send("RING")
+    ag.send('+CLIP: "919876543210",145')
+    assert seen == ["+919876543210"]
+    ag.advance(20)
+    assert ag.sent[-1] == "ATA"
+
+
+def test_national_number_is_left_alone():
+    seen = []
+    ag = FakeAg(policy=lambda n: seen.append(n) or Action.AI).connect()
+    ag.ciev("callsetup", 1)
+    ag.send("RING")
+    ag.send('+CLIP: "9876543210",129')
+    assert seen == ["9876543210"]
 
 
 # ----- policy -----------------------------------------------------------------------

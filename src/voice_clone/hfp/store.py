@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -17,6 +18,12 @@ from .call import CallRecord
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_AGE = 24 * 3600.0
+
+_STORE_FILE = re.compile(r"\d+-\d+\.(?:wav|json|json\.tmp)")
+
+
+class StoreError(ValueError):
+    pass
 
 
 def default_calls_dir() -> Path:
@@ -32,6 +39,17 @@ class CallStore:
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
+
+    def claim(self) -> None:
+        """Create the private directory, refusing an existing one that holds other files."""
+        if self.root.is_dir():
+            foreign = [e.name for e in self.root.iterdir() if not _STORE_FILE.fullmatch(e.name)]
+            if foreign:
+                raise StoreError(
+                    f"{self.root} already holds files that are not call records "
+                    f"(for example {foreign[0]}); pick a dedicated directory"
+                )
+        self.ensure()
 
     def audio_path(self, call_id: str) -> Path:
         return self.root / f"{call_id}.wav"
@@ -53,12 +71,12 @@ class CallStore:
         return path
 
     def cleanup(self, now_wall: float) -> list[Path]:
-        """Delete every file in the store older than ``max_age``; returns what was removed."""
+        """Delete the store's own files older than ``max_age``; returns what was removed."""
         removed: list[Path] = []
         if not self.root.is_dir():
             return removed
         for entry in self.root.iterdir():
-            if not entry.is_file() or entry.is_symlink():
+            if not _STORE_FILE.fullmatch(entry.name) or not entry.is_file() or entry.is_symlink():
                 continue
             try:
                 age = now_wall - entry.stat().st_mtime
