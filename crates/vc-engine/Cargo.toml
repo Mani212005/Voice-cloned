@@ -1,0 +1,27 @@
+[package]
+name = "vc-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hex = "0.4.3"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "macros", "sync", "time", "fs"] }
+tokio-util = "0.7.20"
+tracing = "0.1.44"
+vc-audio = { version = "0.1.0", path = "../vc-audio" }
+vc-backend = { version = "0.1.0", path = "../vc-backend" }
+vc-core = { version = "0.1.0", path = "../vc-core" }
+vc-store = { version = "0.1.0", path = "../vc-store" }
+vc-text = { version = "0.1.0", path = "../vc-text" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

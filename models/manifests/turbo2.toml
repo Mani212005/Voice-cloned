@@ -1,0 +1,54 @@
+# Recipe "turbo2": the v1 voice engine.
+#
+# Chatterbox V3 T3 (Q4_K, used as published) + Chatterbox Turbo S3Gen (Q4_K, published,
+# 2-step "meanflow" decoder), run by the pinned CrispASR CLI. Chosen over best1 (V3 T3 +
+# spliced s-v3voc S3Gen, 6 decoder steps) because it is 4-5x cheaper in CPU with equal
+# speaker similarity and intelligibility in English and Hindi, at 0.4-0.5 dB lower HNR.
+# No spliced file is needed. See models/recipes/turbo2/README.md.
+id = "turbo2"
+kind = "crispasr-cli"
+runtime = "third_party/crispasr/PIN.toml"
+
+[[files]]
+role = "t3"
+name = "chatterbox-v3-t3-q4_k.gguf"
+url = "https://huggingface.co/cstr/chatterbox-GGUF/resolve/c45504bb8d55473a2213db17ec472ed11b69056a/chatterbox-v3-t3-q4_k.gguf"
+bytes = 386367392
+sha256 = "fb63d7c53c4f8bb07286d67709c4d4200fa63b4de3476a4558f37964ce8e5aa6"
+license = "MIT"
+
+[[files]]
+role = "s3gen"
+name = "chatterbox-turbo-s3gen-q4_k.gguf"
+url = "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/b544cf8b49504d880640864a757b3ff3e4421a42/chatterbox-turbo-s3gen-q4_k.gguf"
+bytes = 255891744
+sha256 = "1c16251e6722c46500ebddd92be495e0dba160c31169f4b64d833acba819b060"
+license = "MIT"
+
+[engine]
+backend = "chatterbox"
+tts_steps = 2
+# More threads only burn CPU on this 2P+8E laptop (measured 4/6/8/12).
+threads = 6
+# Pinned: the CLI re-seeds T3 and S3Gen from --seed, so output is a pure function of
+# (binary, models, reference, text, seed). Another seed is a different rendition.
+seed = 0
+sample_rate_hz = 24000
+languages = ["en", "hi"]
+
+# Environment passed to the engine; everything else is cleared.
+[engine.env]
+# FASTCONV=1 peaks at 1.094 GB on this recipe, too close to the budget.
+CRISPASR_S3GEN_FASTCONV = "0"
+
+[budget]
+# 1.1 GB in the unit of the evidence base: ru_maxrss in KiB divided by 1e6.
+# Measured peak for one chunk of 19 words or fewer: 1.00-1.07 GB.
+ram_budget_kib = 1100000
+# One engine process per chunk; a long-lived engine grew past the budget.
+max_chunk_words = 19
+max_chunk_chars = 200
+
+[reference]
+min_s = 5.0
+max_s = 30.0

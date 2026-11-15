@@ -7,3 +7,8 @@ __pycache__/
 voiceclone-calls/
 **/voiceclone-calls/**
 data/voiceclone-data/
+# Rust build output.
+/target/
+# Model files and the engine runtime, fetched by `cargo xtask fetch-models`. Never commit.
+/models/files/
+/models/runtime/
