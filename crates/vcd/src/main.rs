@@ -125,7 +125,6 @@ fn serve(cfg: Config) -> anyhow::Result<()> {
             model_dir: models_dir.join("files"),
             threads: cfg.engine.threads,
             nice: cfg.engine.nice,
-            spoken_disclaimer: cfg.engine.spoken_disclaimer,
             extra_env: vec![],
         },
     );

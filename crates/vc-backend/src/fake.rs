@@ -87,7 +87,6 @@ impl FakeBackend {
                 ram_budget_kib: 1_100_000,
                 deterministic: true,
                 watermark: "none",
-                spoken_disclaimer: false,
                 reference_min_s: 5.0,
                 reference_max_s: 30.0,
             },

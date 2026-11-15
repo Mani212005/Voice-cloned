@@ -26,9 +26,6 @@ pub struct CrispOptions {
     pub threads: Option<u32>,
     /// Minimum niceness of the engine (the laptop is shared).
     pub nice: i32,
-    /// Prepend CrispASR's spoken AI disclaimer. Off in v1 by the owner's decision; the
-    /// inaudible watermark stays on either way.
-    pub spoken_disclaimer: bool,
     /// Extra environment for the engine. Only tests use this, to steer `fake-engine`.
     pub extra_env: Vec<(String, String)>,
 }
@@ -55,7 +52,6 @@ impl CrispCliBackend {
             ram_budget_kib: manifest.budget.ram_budget_kib,
             deterministic: true,
             watermark: "crispasr-builtin",
-            spoken_disclaimer: options.spoken_disclaimer,
             reference_min_s: manifest.reference.min_s,
             reference_max_s: manifest.reference.max_s,
         };
@@ -129,10 +125,8 @@ impl CrispCliBackend {
         push(&"--i-have-rights");
         push(&"--consent-log");
         push(&consent_log);
-        if !self.options.spoken_disclaimer {
-            push(&"--no-spoken-disclaimer");
-            push(&"--accept-marking-responsibility");
-        }
+        push(&"--no-spoken-disclaimer");
+        push(&"--accept-marking-responsibility");
         push(&"--tts");
         push(&req.text);
         push(&"--tts-output");
@@ -247,7 +241,7 @@ mod tests {
     use super::*;
     use vc_core::Language;
 
-    fn backend(spoken_disclaimer: bool) -> CrispCliBackend {
+    fn backend() -> CrispCliBackend {
         CrispCliBackend::new(
             RecipeManifest::turbo2(),
             &RuntimePin::crispasr(),
@@ -256,7 +250,6 @@ mod tests {
                 model_dir: "/m".into(),
                 threads: None,
                 nice: 10,
-                spoken_disclaimer,
                 extra_env: vec![],
             },
         )
@@ -279,7 +272,7 @@ mod tests {
 
     #[test]
     fn english_argv_is_the_turbo2_recipe() {
-        let b = backend(false);
+        let b = backend();
         let argv = strings(b.argv(
             &req(Language::En),
             Path::new("/w/o.wav"),
@@ -319,23 +312,15 @@ mod tests {
 
     #[test]
     fn hindi_from_an_english_reference_adds_source_language() {
-        let b = backend(false);
+        let b = backend();
         let argv = strings(b.argv(&req(Language::Hi), Path::new("/o"), Path::new("/c")));
         let l = argv.iter().position(|a| a == "-l").unwrap();
         assert_eq!(argv[l + 1..l + 4], ["hi", "-sl", "en"]);
     }
 
     #[test]
-    fn spoken_disclaimer_drops_the_opt_out_flags() {
-        let argv =
-            strings(backend(true).argv(&req(Language::En), Path::new("/o"), Path::new("/c")));
-        assert!(!argv.iter().any(|a| a == "--no-spoken-disclaimer"));
-        assert!(!argv.iter().any(|a| a == "--accept-marking-responsibility"));
-    }
-
-    #[test]
     fn env_is_isolated() {
-        let env: Vec<(String, String)> = backend(false)
+        let env: Vec<(String, String)> = backend()
             .env(&req(Language::En))
             .into_iter()
             .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
@@ -353,11 +338,10 @@ mod tests {
 
     #[test]
     fn capabilities_come_from_the_manifest() {
-        let c = backend(false).capabilities().clone();
+        let c = backend().capabilities().clone();
         assert_eq!(c.backend_id, "turbo2");
         assert_eq!(c.max_chunk_words, 19);
         assert_eq!(c.concurrency, 1);
         assert_eq!(c.sample_rate_hz, 24_000);
-        assert!(!c.spoken_disclaimer);
     }
 }

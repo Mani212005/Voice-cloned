@@ -45,9 +45,6 @@ pub struct EngineCfg {
     pub queue_capacity: usize,
     pub inter_chunk_gap_ms: u32,
     pub crash_retries: u32,
-    /// CrispASR's audible AI disclaimer before each chunk. Off by the owner's decision
-    /// for v1; the inaudible watermark is always on.
-    pub spoken_disclaimer: bool,
 }
 
 impl Default for Server {
@@ -79,7 +76,6 @@ impl Default for EngineCfg {
             queue_capacity: 16,
             inter_chunk_gap_ms: 200,
             crash_retries: 1,
-            spoken_disclaimer: false,
         }
     }
 }
@@ -138,7 +134,6 @@ mod tests {
         c.validate().unwrap();
         assert_eq!(c.server.listen.to_string(), "127.0.0.1:8740");
         assert_eq!(c.storage.output_ttl_hours, 24);
-        assert!(!c.engine.spoken_disclaimer);
     }
 
     #[test]

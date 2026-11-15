@@ -466,17 +466,6 @@ impl Store {
             .ok_or(StoreError::NotFound)
     }
 
-    /// Jobs, newest first.
-    pub fn list_jobs(&self, limit: usize) -> Result<Vec<JobRow>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM jobs ORDER BY id DESC LIMIT ?1",
-            Self::JOB_COLS
-        ))?;
-        let rows = stmt.query_map([limit], Self::job_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     /// Jobs in `state`, oldest first.
     pub fn jobs_in_state(&self, state: JobState) -> Result<Vec<JobRow>> {
         let conn = self.conn();

@@ -5,13 +5,11 @@
 //! GET    /v1/version               app, backend, runtime pin, model hashes, consent chain head
 //! GET    /v1/models                backend capability declaration
 //! POST   /v1/consents              JSON consent record (own voice only in v1)
-//! GET    /v1/consents/{id}
 //! POST   /v1/voices                multipart: consent_id, name, reference_language, file (WAV)
 //! GET    /v1/voices
 //! GET    /v1/voices/{id}
 //! DELETE /v1/voices/{id}           409 voice_in_use while a job uses it
 //! POST   /v1/jobs                  JSON {voice_id, language, text} -> 202 + Location
-//! GET    /v1/jobs
 //! GET    /v1/jobs/{id}             state, queue position, progress, timings, peak RSS
 //! GET    /v1/jobs/{id}/audio       final WAV once succeeded
 //! DELETE /v1/jobs/{id}             cancel (kills the engine) or delete an ended job
@@ -20,7 +18,10 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::header;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use vc_engine::Engine;
 
@@ -64,15 +65,49 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/version", get(meta::version))
         .route("/v1/models", get(meta::models))
         .route("/v1/consents", axum::routing::post(consents::create))
-        .route("/v1/consents/{id}", get(consents::get))
         .route("/v1/voices", get(voices::list).post(voices::create))
         .route("/v1/voices/{id}", get(voices::get).delete(voices::delete))
-        .route("/v1/jobs", get(jobs::list).post(jobs::create))
+        .route("/v1/jobs", axum::routing::post(jobs::create))
         .route("/v1/jobs/{id}", get(jobs::get).delete(jobs::delete))
         .route("/v1/jobs/{id}/audio", get(jobs::audio))
         .fallback(|| async { Problem::not_found("route") })
         .layer(DefaultBodyLimit::max(limit))
+        .layer(axum::middleware::from_fn(local_host_only))
         .with_state(Arc::new(state))
+}
+
+/// Refuse any request addressed to a host other than the loopback names. The listener is
+/// loopback-only, but a web page can reach it through DNS rebinding with its own hostname
+/// in `Host`, which this closes.
+async fn local_host_only(req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .map(|v| v.to_str().unwrap_or_default())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()));
+    if host.is_some_and(|h| !is_loopback_host(h)) {
+        return Problem::invalid("requests must be addressed to localhost").into_response();
+    }
+    next.run(req).await
+}
+
+fn is_loopback_host(authority: &str) -> bool {
+    let split = if authority.starts_with('[') {
+        authority.find(']').map(|i| i + 1)
+    } else {
+        Some(authority.find(':').unwrap_or(authority.len()))
+    };
+    let Some((host, port)) = split.map(|i| authority.split_at(i)) else {
+        return false;
+    };
+    let port_ok = port.is_empty()
+        || port
+            .strip_prefix(':')
+            .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    port_ok
+        && ["127.0.0.1", "localhost", "[::1]"]
+            .iter()
+            .any(|ok| host.eq_ignore_ascii_case(ok))
 }
 
 type State = axum::extract::State<Arc<AppState>>;

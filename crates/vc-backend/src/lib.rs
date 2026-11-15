@@ -106,7 +106,6 @@ pub struct Capabilities {
     /// Output is a pure function of the inputs and the pinned seed.
     pub deterministic: bool,
     pub watermark: &'static str,
-    pub spoken_disclaimer: bool,
     pub reference_min_s: f64,
     pub reference_max_s: f64,
 }

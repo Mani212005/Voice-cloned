@@ -1,12 +1,11 @@
 use axum::Json;
-use axum::extract::Path;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use serde::Deserialize;
-use vc_core::{ConsentId, Language};
+use vc_core::Language;
 use vc_store::{ConsentRecord, NewConsent};
 
-use crate::{Problem, State, label, parse_id, rejection, store_err};
+use crate::{Problem, State, label, rejection, store_err};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,15 +43,4 @@ pub async fn create(
         .map_err(|e| store_err(e, "consent"))?;
     tracing::info!(consent_id = %record.id, seq = record.seq, "consent recorded");
     Ok((StatusCode::CREATED, Json(record)))
-}
-
-pub async fn get(state: State, Path(id): Path<String>) -> Result<Json<ConsentRecord>, Problem> {
-    let id: ConsentId = parse_id(&id, "consent")?;
-    let record = state
-        .engine
-        .context()
-        .store
-        .get_consent(id)
-        .map_err(|e| store_err(e, "consent"))?;
-    Ok(Json(record))
 }

@@ -4,7 +4,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use vc_core::{ErrorCode, JobId, JobState, Language, VoiceId};
 use vc_engine::{CancelOutcome, EnqueueError, QueueStatus};
@@ -113,20 +113,6 @@ pub async fn create(
         headers.insert(header::LOCATION, loc);
     }
     Ok((StatusCode::ACCEPTED, headers, Json(body)).into_response())
-}
-
-pub async fn list(state: State) -> Result<Json<Value>, Problem> {
-    let rows = state
-        .engine
-        .context()
-        .store
-        .list_jobs(100)
-        .map_err(|e| store_err(e, "job"))?;
-    let mut jobs = Vec::with_capacity(rows.len());
-    for row in &rows {
-        jobs.push(view(&state, row).await?);
-    }
-    Ok(Json(json!({ "jobs": jobs })))
 }
 
 pub async fn get(state: State, Path(id): Path<String>) -> Result<Json<Value>, Problem> {

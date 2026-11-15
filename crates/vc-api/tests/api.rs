@@ -260,14 +260,72 @@ async fn health_version_and_models() {
 }
 
 #[tokio::test]
+async fn only_loopback_hosts_are_served() {
+    let api = Api::fake();
+    let with_host = |host: &str| {
+        Request::get("/v1/health")
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .unwrap()
+    };
+    for host in [
+        "127.0.0.1",
+        "127.0.0.1:8740",
+        "localhost",
+        "LocalHost:8740",
+        "[::1]",
+        "[::1]:8740",
+    ] {
+        assert_eq!(
+            api.call(with_host(host)).await.status,
+            StatusCode::OK,
+            "{host}"
+        );
+    }
+    for host in [
+        "evil.example",
+        "evil.example:8740",
+        "127.0.0.1.evil.example",
+        "localhost.evil.example:8740",
+        "10.0.0.5:8740",
+        "[::2]",
+        "127.0.0.1:",
+        "127.0.0.1:80x",
+        "[::1",
+        "",
+    ] {
+        let r = api.call(with_host(host)).await;
+        assert_eq!(
+            (r.status, r.code()),
+            (StatusCode::BAD_REQUEST, "invalid_request".into()),
+            "{host}"
+        );
+    }
+    let r = api
+        .call(
+            Request::get("/v1/nope")
+                .header(header::HOST, "evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn consents_are_own_voice_only_and_chain() {
     let api = Api::fake();
-    let id = api.consent().await;
-    let c = api.get(&format!("/v1/consents/{id}")).await.json();
-    assert_eq!(c["seq"], 1);
-    assert_eq!(c["prev_hash"], vc_store::GENESIS_HASH);
+    let own = json!({
+        "speaker_name": "Owner", "relationship": "self",
+        "attestation": "This is my own voice.", "languages": ["en"],
+    });
+    let first = api.post_json("/v1/consents", own.clone()).await.json();
+    assert_eq!(first["seq"], 1);
+    assert_eq!(first["prev_hash"], vc_store::GENESIS_HASH);
     let head = api.get("/v1/version").await.json()["consent_chain_head"].clone();
-    assert_eq!(head, c["record_hash"]);
+    assert_eq!(head, first["record_hash"]);
+    let second = api.post_json("/v1/consents", own).await.json();
+    assert_eq!(second["prev_hash"], first["record_hash"]);
 
     let r = api
         .post_json(
@@ -287,8 +345,11 @@ async fn consents_are_own_voice_only_and_chain() {
         (r.status, r.code()),
         (StatusCode::BAD_REQUEST, "invalid_request".into())
     );
-    let r = api.get("/v1/consents/cns_nope").await;
-    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let id = first["id"].as_str().unwrap();
+    assert_eq!(
+        api.get(&format!("/v1/consents/{id}")).await.status,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -428,9 +489,6 @@ async fn a_job_runs_to_a_downloadable_wav() {
         hex::encode(sha2::Sha256::digest(&a.body))
     );
 
-    let listed = api.get("/v1/jobs").await.json();
-    assert_eq!(listed["jobs"][0]["id"], job.as_str());
-
     // Deleting an ended job removes it and its audio.
     assert_eq!(
         api.delete(&format!("/v1/jobs/{job}")).await.status,
@@ -495,11 +553,9 @@ async fn job_validation() {
         let r = api.post_json("/v1/jobs", body.clone()).await;
         assert_eq!((r.status, r.code()), (status, code.to_owned()), "{body}");
     }
-    assert!(
-        api.get("/v1/jobs").await.json()["jobs"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        api.get("/v1/jobs").await.status,
+        StatusCode::METHOD_NOT_ALLOWED
     );
 }
 

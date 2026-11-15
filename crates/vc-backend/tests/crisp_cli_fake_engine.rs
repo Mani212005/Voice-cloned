@@ -45,7 +45,6 @@ impl Fixture {
                 model_dir: self.path("models"),
                 threads: None,
                 nice: 0,
-                spoken_disclaimer: false,
                 extra_env: env
                     .iter()
                     .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -206,7 +205,6 @@ async fn missing_binary_is_a_spawn_error() {
             model_dir: f.path("models"),
             threads: None,
             nice: 0,
-            spoken_disclaimer: false,
             extra_env: vec![],
         },
     );

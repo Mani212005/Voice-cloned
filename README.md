@@ -70,9 +70,12 @@ curl -s -X DELETE $B/v1/jobs/job_...           # cancel (kills the engine) or de
 | Endpoint | |
 |---|---|
 | `GET /v1/health`, `/v1/version`, `/v1/models` | liveness; backend, runtime pin, model hashes, consent chain head; capabilities |
-| `POST /v1/consents`, `GET /v1/consents/{id}` | append-only, hash-chained consent records |
+| `POST /v1/consents` | append-only, hash-chained consent records |
 | `POST/GET /v1/voices`, `GET/DELETE /v1/voices/{id}` | enroll one WAV reference, list, delete (409 while a job uses it) |
-| `POST/GET /v1/jobs`, `GET/DELETE /v1/jobs/{id}`, `GET /v1/jobs/{id}/audio` | queue a job (202, 429 when the queue is full), progress, cancel or delete, the final WAV |
+| `POST /v1/jobs`, `GET/DELETE /v1/jobs/{id}`, `GET /v1/jobs/{id}/audio` | queue a job (202, 429 when the queue is full), progress, cancel or delete, the final WAV |
+
+Requests whose `Host` is not `127.0.0.1`, `localhost` or `[::1]` are refused with a 400,
+which blocks DNS-rebinding pages from driving the loopback listener.
 
 Errors are `application/problem+json` with a stable `code`. Settings live in an optional
 `vcd.toml` (`--config`); every key has a default.
@@ -91,5 +94,5 @@ cancel, recovery, retention), `vc-api` (axum routes), `vcd` (the binary), `xtask
 Not in v1 yet: encryption at rest and crypto-erase, server-sent progress events and
 per-chunk downloads, `/v1/speech` streaming, C2PA signing of the joined output, metrics,
 a systemd unit with an engine sandbox, API keys, a persistent C-ABI engine worker, Opus
-output, an OpenAI-compatible shim, and a per-request switch for the spoken AI disclaimer
-(today it is one config setting, `engine.spoken_disclaimer`, off by default).
+output, an OpenAI-compatible shim, and an option for the spoken AI disclaimer (always off
+in v1).
