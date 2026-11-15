@@ -1,0 +1,20 @@
+# Pinned CrispASR runtime. vcd runs this exact release binary as a child process per
+# text chunk; it is never linked into vcd. `cargo xtask fetch-models` downloads the
+# tarball, checks size and sha256, and unpacks it under models/runtime/.
+name = "crispasr"
+version = "0.8.53"
+commit = "1694d8ef516799b290c6da5fe80803b4af2771b0"
+license = "MIT"
+source = "https://github.com/CrispStrobe/CrispASR/tree/v0.8.53"
+
+[linux-x86_64]
+url = "https://github.com/CrispStrobe/CrispASR/releases/download/v0.8.53/crispasr-linux-x86_64.tar.gz"
+bytes = 44169635
+sha256 = "3396d49473642d1097b667270b54125279bdca740b735e15c3c96c1b32f787c0"
+# Directory inside the tarball, and the binary inside it. The binary finds its bundled
+# shared libraries through RUNPATH=$ORIGIN, so it must stay next to them.
+dir = "crispasr-linux-x86_64"
+binary = "crispasr"
+# The unpacked binary, re-checked by `vcd serve` and `vcd models verify` on every start.
+binary_bytes = 31914656
+binary_sha256 = "949c869f0c0b1b733930dd46bd906528a98eb0fd9d4fd20d253a6eb34eb5b1ce"
