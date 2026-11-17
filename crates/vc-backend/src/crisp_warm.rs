@@ -51,6 +51,9 @@ const CONSENT_ATTESTATION: &str = "vcd: synthesis under the consent record of th
 const MAX_RESPONSE_BYTES: usize = 64 << 20;
 /// How often a starting engine is asked whether it is ready.
 const READY_POLL: Duration = Duration::from_millis(25);
+/// Longest wait for one health probe; an engine that accepts the connection but does not
+/// answer is probed again until `start_timeout`.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct WarmOptions {
@@ -177,6 +180,18 @@ impl CrispWarmBackend {
         env
     }
 
+    /// Wait for the slot, giving up when `cancel` fires (the holder may be a long start-up
+    /// or warm-up).
+    async fn lock_slot(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<WarmEngine>>, BackendError> {
+        tokio::select! {
+            guard = self.slot.lock() => Ok(guard),
+            () = cancel.cancelled() => Err(BackendError::Cancelled),
+        }
+    }
+
     async fn run_chunk(
         &self,
         req: &ChunkRequest,
@@ -185,7 +200,7 @@ impl CrispWarmBackend {
         if cancel.is_cancelled() {
             return Err(BackendError::Cancelled);
         }
-        let mut slot = self.slot.lock().await;
+        let mut slot = self.lock_slot(cancel).await?;
         let started = Instant::now();
         self.ensure(&mut slot, &req.reference, cancel).await?;
         let wav = self
@@ -224,7 +239,7 @@ impl CrispWarmBackend {
         if cancel.is_cancelled() {
             return Err(BackendError::Cancelled);
         }
-        let mut slot = self.slot.lock().await;
+        let mut slot = self.lock_slot(cancel).await?;
         let started = Instant::now();
         self.ensure(&mut slot, &voice.reference, cancel).await?;
         if slot.as_ref().is_some_and(|e| e.voice_ready) {
@@ -354,7 +369,20 @@ impl CrispWarmBackend {
                     return Ok(Err(format!("engine status: {e}")));
                 }
             }
-            if let Ok((200, _)) = request(&engine, "GET", "/health", None).await {
+            let wait = self
+                .options
+                .start_timeout
+                .saturating_sub(started.elapsed())
+                .min(HEALTH_TIMEOUT);
+            let probe = tokio::select! {
+                r = tokio::time::timeout(wait, request(&engine, "GET", "/health", None)) => r,
+                () = cancel.cancelled() => {
+                    let _ = engine.child.kill_and_reap().await;
+                    let _ = remove_tree(dir);
+                    return Err(BackendError::Cancelled);
+                }
+            };
+            if let Ok(Ok((200, _))) = probe {
                 engine.peak_rss_kib = engine.child.peak_rss_kib().unwrap_or(0);
                 tracing::info!(
                     pid = engine.child.pid(),
@@ -363,7 +391,7 @@ impl CrispWarmBackend {
                 );
                 return Ok(Ok(engine));
             }
-            if started.elapsed() > self.options.start_timeout {
+            if started.elapsed() >= self.options.start_timeout {
                 let _ = engine.child.kill_and_reap().await;
                 return Ok(Err(format!(
                     "engine not ready after {} s",
@@ -669,6 +697,49 @@ mod tests {
 
     fn strings(v: Vec<OsString>) -> Vec<String> {
         v.into_iter().map(|s| s.into_string().unwrap()).collect()
+    }
+
+    /// A caller queued behind the slot's holder gives up as soon as its own token fires,
+    /// instead of waiting out a long start-up or warm-up.
+    #[tokio::test]
+    async fn waiting_for_the_slot_honors_cancel() {
+        let b = backend();
+        let voice = VoiceRef {
+            reference: "/ref.wav".into(),
+            reference_language: Language::En,
+        };
+        let req = ChunkRequest {
+            idx: 0,
+            text: "hi".into(),
+            language: Language::En,
+            reference: "/ref.wav".into(),
+            reference_language: Language::En,
+            work_dir: "/w".into(),
+        };
+        let held = b.slot.lock().await;
+
+        let cancel = CancellationToken::new();
+        let chunk = b.run_chunk(&req, &cancel);
+        tokio::pin!(chunk);
+        tokio::select! {
+            biased;
+            _ = &mut chunk => panic!("must wait for the slot"),
+            () = async {} => {}
+        }
+        cancel.cancel();
+        assert_eq!(chunk.await.unwrap_err(), BackendError::Cancelled);
+
+        let cancel = CancellationToken::new();
+        let prepare = b.run_prepare(&voice, &cancel);
+        tokio::pin!(prepare);
+        tokio::select! {
+            biased;
+            _ = &mut prepare => panic!("must wait for the slot"),
+            () = async {} => {}
+        }
+        cancel.cancel();
+        assert_eq!(prepare.await.unwrap_err(), BackendError::Cancelled);
+        drop(held);
     }
 
     #[test]

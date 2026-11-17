@@ -43,6 +43,15 @@ impl Fixture {
     /// A backend whose engine records into `record.txt`, with optional budget and
     /// headroom overrides.
     fn backend(&self, env: &[(&str, &str)], budget: Option<(u64, u64)>) -> CrispWarmBackend {
+        self.backend_with_start_timeout(env, budget, Duration::from_secs(60))
+    }
+
+    fn backend_with_start_timeout(
+        &self,
+        env: &[(&str, &str)],
+        budget: Option<(u64, u64)>,
+        start_timeout: Duration,
+    ) -> CrispWarmBackend {
         let mut manifest = RecipeManifest::turbo2();
         if let Some((budget_kib, headroom_kib)) = budget {
             manifest.budget.ram_budget_kib = budget_kib;
@@ -59,7 +68,7 @@ impl Fixture {
                 engine_dir: self.path("engine"),
                 threads: None,
                 nice: 0,
-                start_timeout: Duration::from_secs(60),
+                start_timeout,
                 extra_env,
             },
         )
@@ -415,4 +424,56 @@ async fn an_engine_that_exits_during_start_up_is_a_spawn_error() {
         "{err:?}"
     );
     assert_eq!(f.starts().len(), 2, "one retry on a new port");
+}
+
+async fn started_pid(started: PathBuf) -> i32 {
+    tokio::task::spawn_blocking(move || std::fs::read_to_string(started))
+        .await
+        .unwrap()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_while_the_engine_does_not_answer_its_health_check() {
+    let f = Fixture::new();
+    let started = f.path("started");
+    mkfifo(&started);
+    let b = std::sync::Arc::new(f.backend(
+        &[
+            ("FAKE_ENGINE_MODE", "silent-health"),
+            ("FAKE_ENGINE_STARTED_FIFO", started.to_str().unwrap()),
+        ],
+        None,
+    ));
+    let cancel = CancellationToken::new();
+    let req = f.req("hi", Language::En, "ref.wav");
+    let task = {
+        let (b, cancel) = (b.clone(), cancel.clone());
+        tokio::spawn(async move { b.synthesize_chunk(&req, &cancel).await })
+    };
+    let pid = started_pid(started).await;
+    cancel.cancel();
+    assert_eq!(task.await.unwrap(), Err(BackendError::Cancelled));
+    assert!(gone(pid));
+    assert!(!f.path("engine").exists(), "the engine directory is wiped");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_timeout_applies_to_an_engine_that_does_not_answer_its_health_check() {
+    let f = Fixture::new();
+    let b = f.backend_with_start_timeout(
+        &[("FAKE_ENGINE_MODE", "silent-health")],
+        None,
+        Duration::from_millis(300),
+    );
+    let err = speak(&b, &f.req("hi", Language::En, "ref.wav"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Spawn(_)), "{err:?}");
+    for pid in f.starts() {
+        assert!(gone(pid));
+    }
 }

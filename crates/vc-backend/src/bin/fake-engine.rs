@@ -22,7 +22,9 @@
 //! - `FAKE_ENGINE_ALLOC_MB`: touch and keep this many more MiB on every speech request
 //!   (a warm engine whose peak RSS grows per chunk)
 //! - `FAKE_ENGINE_MODE`: `ok` (default), `exit-at-start:<code>`, `crash-on:<n>` (abort
-//!   during the n-th speech request), `reject-on:<n>` (answer the n-th with HTTP 500)
+//!   during the n-th speech request), `reject-on:<n>` (answer the n-th with HTTP 500),
+//!   `silent-health` (accept `GET /health` connections but never answer them; the first
+//!   one writes the pid to `FAKE_ENGINE_STARTED_FIFO`)
 //! - `FAKE_ENGINE_STARTED_FIFO` / `FAKE_ENGINE_BLOCK_FIFO`: as in CLI mode, during every
 //!   speech request whose input is `block`
 
@@ -135,8 +137,8 @@ fn hound_spec(channels: u16, sample_rate: u32) -> hound::WavSpec {
     }
 }
 
-/// `FAKE_ENGINE_STARTED_FIFO` and `FAKE_ENGINE_BLOCK_FIFO`.
-fn announce_and_block() -> Result<(), String> {
+/// Write our pid to `FAKE_ENGINE_STARTED_FIFO`, if set.
+fn announce_started() -> Result<(), String> {
     if let Ok(fifo) = std::env::var("FAKE_ENGINE_STARTED_FIFO") {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -144,6 +146,12 @@ fn announce_and_block() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         writeln!(f, "{}", std::process::id()).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// `FAKE_ENGINE_STARTED_FIFO` and `FAKE_ENGINE_BLOCK_FIFO`.
+fn announce_and_block() -> Result<(), String> {
+    announce_started()?;
     if let Ok(fifo) = std::env::var("FAKE_ENGINE_BLOCK_FIFO") {
         let mut buf = Vec::new();
         std::fs::File::open(fifo)
@@ -215,12 +223,20 @@ fn serve(args: &[String]) -> Result<ExitCode, String> {
     eprintln!("fake-engine: serving on {port}");
 
     let mut kept: Vec<Vec<u8>> = Vec::new();
+    let mut held: Vec<std::net::TcpStream> = Vec::new();
     let mut requests = 0usize;
     for stream in listener.incoming() {
         let mut stream = stream.map_err(|e| e.to_string())?;
         let Ok((method, path, headers, body)) = read_request(&mut stream) else {
             continue;
         };
+        if mode == "silent-health" && method == "GET" && path == "/health" {
+            if held.is_empty() {
+                announce_started()?;
+            }
+            held.push(stream);
+            continue;
+        }
         let authorized = headers
             .iter()
             .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && *v == format!("Bearer {key}"));
