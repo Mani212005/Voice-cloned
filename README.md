@@ -29,7 +29,11 @@ uv run voice-clone hfp run                 # answer after 20 s of ringing
 - Call audio and records are kept only in `~/.local/share/voiceclone-calls`
   (owner-only permissions) and are deleted after 24 hours. Never commit them.
   `--calls-dir` must be a dedicated directory: the daemon refuses one that holds other
-  files, and only ever deletes its own call files.
+  files, and only ever deletes its own call files: regular files named
+  `<seconds>-<n>.wav`/`.json` directly inside a directory it marked with
+  `.voiceclone-store`. It never follows symlinks, never enters subdirectories and
+  `voice-clone hfp cleanup` refuses a directory without the marker (for example your
+  home folder).
 - The shipped intro and beep are placeholder tones. Pass `--intro`/`--beep` WAV files
   (any rate, resampled to 8 or 16 kHz) to replace them.
 - `--wideband` offers mSBC 16 kHz through the system `libsbc.so.1`. Narrowband

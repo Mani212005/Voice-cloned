@@ -69,6 +69,9 @@ class CvsdLink:
     def outgoing(self, size: int, pull: Callable[[int], bytes]) -> bytes:
         return pull(size)
 
+    def close(self) -> None:
+        """Nothing to release: the controller does the codec."""
+
 
 class MsbcLink:
     """Wideband: transparent SCO carrying H2 framed mSBC at 16 kHz."""
@@ -77,9 +80,19 @@ class MsbcLink:
 
     def __init__(self) -> None:
         self._encoder = MsbcEncoder()
-        self._decoder = MsbcDecoder()
+        try:
+            self._decoder = MsbcDecoder()
+        except BaseException:
+            self._encoder.close()
+            raise
         self._reassembler = H2Reassembler()
         self._encoded = bytearray()
+
+    def close(self) -> None:
+        """Release the encoder and decoder; safe to call more than once."""
+        self._encoder.close()
+        self._decoder.close()
+        self._encoded.clear()
 
     def incoming(self, packet: bytes) -> bytes:
         return b"".join(self._decoder.decode(f) for f in self._reassembler.feed(packet))

@@ -431,3 +431,67 @@ def test_second_incoming_call_during_ai_call_is_ignored():
     ag.send("RING")
     ag.advance(30)
     assert ag.sent.count("ATA") == 1
+
+
+# ----- call audio that cannot be set up ---------------------------------------------------
+
+
+def test_audio_failure_during_an_ai_call_hangs_up_and_ends_idle():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.take(StartConversation)
+    ag.session.audio_failed()
+    ag._drain()
+    assert ag.sent[-1] == "AT+CHUP"
+    assert ag.take(StopConversation) == [StopConversation(Outcome.AUDIO_FAILED)]
+    ag.ciev("call", 0)
+    record = outcome(ag)
+    assert record.outcome == Outcome.AUDIO_FAILED
+    assert "call audio could not be set up" in record.notes
+    assert ag.session.calls.phase == Phase.IDLE
+
+
+def test_audio_failure_hangup_that_the_phone_never_confirms_still_ends_idle():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.session.audio_failed()
+    ag._drain()
+    ag.advance(5)
+    assert outcome(ag).outcome == Outcome.AUDIO_FAILED
+    assert ag.session.calls.phase == Phase.IDLE
+
+
+def test_audio_failure_before_the_call_is_active_hangs_up_once_it_is():
+    ag = FakeAg().connect()
+    ag.incoming_call()
+    ag.advance(20)
+    assert ag.sent[-1] == "ATA"
+    ag.session.audio_failed()
+    ag._drain()
+    assert ag.sent[-1] == "ATA"  # nothing to hang up yet
+    ag.ciev("call", 1)
+    assert ag.sent[-1] == "AT+CHUP"
+    assert not ag.take(StartConversation)
+    ag.ciev("call", 0)
+    assert outcome(ag).outcome == Outcome.AUDIO_FAILED
+    assert ag.session.calls.phase == Phase.IDLE
+
+
+def test_audio_failure_outside_an_ai_call_is_ignored_and_does_not_taint_the_next_call():
+    ag = FakeAg().connect()
+    ag.session.audio_failed()
+    ag.incoming_call()
+    ag.session.audio_failed()  # still ringing
+    ag._drain()
+    assert "AT+CHUP" not in ag.sent
+    ag.advance(20)
+    ag.ciev("call", 1)
+    ag.take(StartConversation)
+    ag.session.conversation_done()
+    ag._drain()
+    ag.ciev("call", 0)
+    assert outcome(ag).outcome == Outcome.MESSAGE_TAKEN

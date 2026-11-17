@@ -133,21 +133,35 @@ def available() -> bool:
 
 
 class _Codec:
+    """One libsbc state. ``close`` releases it exactly once; any use after that raises."""
+
     def __init__(self) -> None:
+        self._sbc: _SbcStruct | None = None
         lib = libsbc()
         if lib is None:
             raise RuntimeError("libsbc.so.1 is not installed; wideband (mSBC) is unavailable")
+        sbc = _SbcStruct()
+        if lib.sbc_init_msbc(ctypes.byref(sbc), 0) != 0:
+            raise RuntimeError("sbc_init_msbc failed")  # libsbc frees its own state on failure
         self._lib = lib
-        self._sbc = _SbcStruct()
-        if lib.sbc_init_msbc(ctypes.byref(self._sbc), 0) != 0:
-            raise RuntimeError("sbc_init_msbc failed")
+        self._sbc = sbc
+
+    @property
+    def closed(self) -> bool:
+        return self._sbc is None
+
+    def _state(self) -> _SbcStruct:
+        if self._sbc is None:
+            raise RuntimeError("mSBC codec used after close")
+        return self._sbc
 
     def close(self) -> None:
-        if self._sbc is not None:
-            self._lib.sbc_finish(ctypes.byref(self._sbc))
-            self._sbc = None  # type: ignore[assignment]
+        sbc, self._sbc = self._sbc, None
+        if sbc is not None:
+            self._lib.sbc_finish(ctypes.byref(sbc))
 
     def __del__(self) -> None:
+        # Safety net only: owners close explicitly when the call audio ends.
         self.close()
 
 
@@ -164,7 +178,12 @@ class MsbcEncoder(_Codec):
         out = ctypes.create_string_buffer(MSBC_FRAME_BYTES)
         written = ctypes.c_ssize_t(0)
         used = self._lib.sbc_encode(
-            ctypes.byref(self._sbc), src, len(pcm), out, MSBC_FRAME_BYTES, ctypes.byref(written)
+            ctypes.byref(self._state()),
+            src,
+            len(pcm),
+            out,
+            MSBC_FRAME_BYTES,
+            ctypes.byref(written),
         )
         if used != len(pcm) or written.value != MSBC_FRAME_BYTES:
             raise RuntimeError(f"sbc_encode failed ({used}, {written.value})")
@@ -180,7 +199,7 @@ class MsbcDecoder(_Codec):
         out = ctypes.create_string_buffer(PCM_BYTES_PER_FRAME)
         written = ctypes.c_size_t(0)
         used = self._lib.sbc_decode(
-            ctypes.byref(self._sbc),
+            ctypes.byref(self._state()),
             src,
             len(msbc_frame),
             out,
