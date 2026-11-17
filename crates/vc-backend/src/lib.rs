@@ -1,13 +1,15 @@
 //! Speech engine backends.
 //!
 //! A [`Backend`] synthesizes one planned text chunk at a time and declares what it can do
-//! ([`Capabilities`]). v1 ships [`CrispCliBackend`], which runs the pinned CrispASR CLI
-//! as a child process per chunk with the `turbo2` recipe. [`FakeBackend`] is the
-//! in-process test double; the `fake-engine` binary is a CLI-compatible stand-in for
-//! `crispasr` used to test `CrispCliBackend` itself.
+//! ([`Capabilities`]). Two backends run the pinned CrispASR release with the `turbo2`
+//! recipe: [`CrispWarmBackend`] keeps one engine process warm (models loaded, voice
+//! encoded) across chunks and jobs and restarts it before it outgrows the RAM budget;
+//! [`CrispCliBackend`] runs one cold CLI process per chunk. Both produce the same PCM.
+//! [`FakeBackend`] is the in-process test double; the `fake-engine` binary is a stand-in
+//! for `crispasr` (CLI and server modes) used to test the real backends.
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -17,12 +19,15 @@ use vc_audio::MonoPcm;
 use vc_core::{ErrorCode, Language};
 
 pub mod crisp_cli;
+pub mod crisp_warm;
 pub mod fake;
 pub mod manifest;
 pub mod proc;
+pub mod warm_policy;
 
 pub use crisp_cli::{CrispCliBackend, CrispOptions};
-pub use fake::{FakeBackend, FakeControl, FakeOutcome};
+pub use crisp_warm::{CrispWarmBackend, WarmOptions};
+pub use fake::{FakeBackend, FakeControl, FakeOutcome, WarmControl, WarmEvent};
 pub use manifest::{RecipeManifest, RuntimePin};
 pub use proc::ExitInfo;
 
@@ -42,11 +47,19 @@ pub struct ChunkRequest {
     pub work_dir: PathBuf,
 }
 
+/// A voice to get ready for: its reference and the language it is spoken in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceRef {
+    pub reference: PathBuf,
+    pub reference_language: Language,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkStats {
     /// Recorded for reporting, never asserted in tests.
     pub wall: Duration,
-    /// `ru_maxrss` of the engine process in KiB; 0 for in-process backends.
+    /// Peak RSS in KiB of the engine process that ran the chunk, over its whole life so
+    /// far (`ru_maxrss`, or `VmHWM` for a warm engine); 0 for in-process backends.
     pub peak_rss_kib: u64,
 }
 
@@ -146,6 +159,23 @@ pub trait Backend: Send + Sync + 'static {
         req: &'a ChunkRequest,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<ChunkOutput, BackendError>>;
+
+    /// Get ready so the next chunk with `voice` starts warm. Called only while no job is
+    /// running; must stop promptly and return `Cancelled` when `cancel` fires. Backends
+    /// without warm state have nothing to do.
+    fn prepare<'a>(
+        &'a self,
+        _voice: &'a VoiceRef,
+        _cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<(), BackendError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Drop warm state: everything held for the voice with this reference, or everything
+    /// when `reference` is `None`. Returns once any engine holding it has been stopped.
+    fn release<'a>(&'a self, _reference: Option<&'a Path>) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 impl std::fmt::Debug for dyn Backend {

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use vc_api::{ApiConfig, AppState, router};
 use vc_audio::MonoPcm;
-use vc_backend::{Backend, FakeBackend, FakeControl};
+use vc_backend::{Backend, BackendError, FakeBackend, FakeControl, VoiceRef, WarmEvent};
 use vc_core::{JobId, JobState, ManualClock};
 use vc_engine::{Engine, EngineConfig, EngineContext, JobEvent};
 use vc_store::{DataDir, Store};
@@ -449,6 +449,34 @@ async fn enroll_list_get_and_delete_a_voice() {
         api.delete(&format!("/v1/voices/{id}")).await.status,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn an_enrolled_voice_is_warmed_and_a_deleted_one_released() {
+    let (b, mut warm) = FakeBackend::new().warm_gated();
+    let api = Api::new(Arc::new(b), EngineConfig::default(), ApiConfig::default());
+    let id = api.voice().await;
+    let reference = api.data.reference_path(id.parse().unwrap());
+    let voice = VoiceRef {
+        reference: reference.clone(),
+        reference_language: vc_core::Language::En,
+    };
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(voice.clone()))
+    );
+    let r = api.delete(&format!("/v1/voices/{id}")).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    let mut two = vec![warm.next().await.unwrap(), warm.next().await.unwrap()];
+    two.sort_by_key(|e| format!("{e:?}"));
+    assert_eq!(
+        two,
+        [
+            WarmEvent::PrepareEnded(voice, Err(BackendError::Cancelled)),
+            WarmEvent::Released(Some(reference.clone())),
+        ]
+    );
+    assert!(!reference.exists());
 }
 
 #[tokio::test]

@@ -150,6 +150,8 @@ pub async fn create(
         return Err(store_err(e, "voice"));
     }
     tracing::info!(voice_id = %row.id, ref_ms = row.ref_ms, "voice enrolled");
+    // The new voice is the one most likely to be used next.
+    state.engine.prepare(row.id).await;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
@@ -188,6 +190,8 @@ pub async fn delete(state: State, Path(id): Path<String>) -> Result<StatusCode, 
         }
         Err(e) => return Err(store_err(e, "voice")),
     }
+    // A warm engine holds this voice's conditioning in memory: stop it first.
+    state.engine.release_voice(id).await;
     vc_store::files::remove_tree(&ctx.data.voice_dir(id)).map_err(|e| {
         tracing::error!(voice_id = %id, "delete reference: {e}");
         Problem::internal()

@@ -53,9 +53,13 @@ pub struct EngineSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budget {
+    /// Ceiling on any engine process's peak RSS (`ru_maxrss` / `VmHWM`), in KiB.
     pub ram_budget_kib: u64,
     pub max_chunk_words: usize,
     pub max_chunk_chars: usize,
+    /// A warm engine is restarted before a chunk when its peak RSS so far plus this
+    /// would cross `ram_budget_kib`.
+    pub restart_headroom_kib: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
@@ -159,6 +163,9 @@ impl RecipeManifest {
         }
         if self.budget.max_chunk_words == 0 || self.budget.max_chunk_chars == 0 {
             return invalid("chunk caps must be positive");
+        }
+        if self.budget.restart_headroom_kib >= self.budget.ram_budget_kib {
+            return invalid("restart_headroom_kib must be below ram_budget_kib");
         }
         if self.engine.threads == 0 || self.engine.tts_steps == 0 {
             return invalid("threads and tts_steps must be positive");
@@ -279,6 +286,8 @@ mod tests {
         assert_eq!(m.engine.env.get("CRISPASR_S3GEN_FASTCONV").unwrap(), "0");
         assert_eq!(m.budget.max_chunk_words, 19);
         assert_eq!(m.budget.ram_budget_kib, 1_100_000);
+        assert_eq!(m.budget.restart_headroom_kib, 100_000);
+        assert_eq!(m.engine.env.get("MALLOC_ARENA_MAX").unwrap(), "1");
         assert_eq!(m.engine.languages, [Language::En, Language::Hi]);
         for f in &m.files {
             assert!(f.url.ends_with(&format!("/{}", f.name)));

@@ -105,6 +105,9 @@ async fn success_returns_engine_pcm_and_cleans_its_raw_output() {
             "CRISPASR_S3GEN_FASTCONV",
             "FAKE_ENGINE_RECORD",
             "HOME",
+            "MALLOC_ARENA_MAX",
+            "MALLOC_MMAP_THRESHOLD_",
+            "MALLOC_TRIM_THRESHOLD_",
             "TMPDIR",
             "XDG_CACHE_HOME"
         ],

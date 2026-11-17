@@ -40,14 +40,24 @@ languages = ["en", "hi"]
 [engine.env]
 # FASTCONV=1 peaks at 1.094 GB on this recipe, too close to the budget.
 CRISPASR_S3GEN_FASTCONV = "0"
+# glibc malloc tuning. A warm engine serves many chunks; with the default allocator its
+# RSS crept up about 22 MB per request and never came back. With one arena, eager
+# trimming and large blocks mmapped, it levels off at the largest chunk it has seen.
+# The audio is bit-identical either way.
+MALLOC_ARENA_MAX = "1"
+MALLOC_TRIM_THRESHOLD_ = "0"
+MALLOC_MMAP_THRESHOLD_ = "65536"
 
 [budget]
 # 1.1 GB in the unit of the evidence base: ru_maxrss in KiB divided by 1e6.
 # Measured peak for one chunk of 19 words or fewer: 1.00-1.07 GB.
 ram_budget_kib = 1100000
-# One engine process per chunk; a long-lived engine grew past the budget.
 max_chunk_words = 19
 max_chunk_chars = 200
+# A warm engine is restarted before a chunk when its peak RSS so far plus this headroom
+# would cross the budget. The largest growth of a warm engine's peak in one chunk was
+# 75 MB (a 19-word chunk after a one-word one); this leaves 25 MB of margin.
+restart_headroom_kib = 100000
 
 [reference]
 min_s = 5.0

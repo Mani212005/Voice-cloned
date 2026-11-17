@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use vc_audio::MonoPcm;
 use vc_backend::fake::{FAKE_SAMPLES_PER_WORD, fake_pcm};
-use vc_backend::{Backend, FakeBackend, FakeControl, FakeOutcome};
+use vc_backend::{
+    Backend, BackendError, FakeBackend, FakeControl, FakeOutcome, VoiceRef, WarmControl, WarmEvent,
+};
 use vc_core::{Clock, ErrorCode, JobId, JobState, Language, ManualClock, VoiceId};
 use vc_engine::{
     CancelOutcome, Engine, EngineConfig, EngineContext, EnqueueError, JobEvent, QueueStatus,
@@ -24,6 +26,7 @@ struct Fx {
     data: DataDir,
     clock: Arc<ManualClock>,
     voice: VoiceId,
+    consent: vc_core::ConsentId,
 }
 
 impl Fx {
@@ -43,31 +46,46 @@ impl Fx {
                 clock.now_ms(),
             )
             .unwrap();
-        let voice = VoiceId::generate();
-        vc_store::files::private_dir(&data.voice_dir(voice)).unwrap();
-        vc_store::files::write_private(
-            &data.reference_path(voice),
-            &vc_audio::encode_wav_bytes(&fake_pcm("ref")).unwrap(),
-        )
-        .unwrap();
-        store
-            .insert_voice(&VoiceRow {
-                id: voice,
-                consent_id: consent.id,
-                name: "me".into(),
-                reference_language: Language::En,
-                ref_sample_rate: 24_000,
-                ref_ms: 100,
-                ref_sha256: "00".repeat(32),
-                created_at_ms: clock.now_ms(),
-            })
-            .unwrap();
-        Self {
+        let mut fx = Self {
             _dir: dir,
             store,
             data,
             clock,
-            voice,
+            voice: VoiceId::generate(),
+            consent: consent.id,
+        };
+        fx.voice = fx.add_voice(Language::En);
+        fx
+    }
+
+    /// Enroll another voice; it is the newest one.
+    fn add_voice(&self, reference_language: Language) -> VoiceId {
+        let voice = VoiceId::generate();
+        vc_store::files::private_dir(&self.data.voice_dir(voice)).unwrap();
+        vc_store::files::write_private(
+            &self.data.reference_path(voice),
+            &vc_audio::encode_wav_bytes(&fake_pcm("ref")).unwrap(),
+        )
+        .unwrap();
+        self.store
+            .insert_voice(&VoiceRow {
+                id: voice,
+                consent_id: self.consent,
+                name: "me".into(),
+                reference_language,
+                ref_sample_rate: 24_000,
+                ref_ms: 100,
+                ref_sha256: "00".repeat(32),
+                created_at_ms: self.clock.now_ms(),
+            })
+            .unwrap();
+        voice
+    }
+
+    fn voice_ref(&self, voice: VoiceId, reference_language: Language) -> VoiceRef {
+        VoiceRef {
+            reference: self.data.reference_path(voice),
+            reference_language,
         }
     }
 
@@ -373,4 +391,153 @@ async fn expired_jobs_and_orphan_dirs_are_swept() {
     assert_eq!(sweep_expired(&ctx), 1);
     assert!(!fx.data.job_dir(job.id).exists());
     assert!(!fx.store.job_exists(job.id).unwrap());
+}
+
+fn warm_gated() -> (Arc<FakeBackend>, WarmControl) {
+    let (b, w) = FakeBackend::new().warm_gated();
+    (Arc::new(b), w)
+}
+
+/// The next two warm events, in either order (they come from two tasks).
+async fn next_two(warm: &mut WarmControl) -> Vec<WarmEvent> {
+    let mut two = vec![warm.next().await.unwrap(), warm.next().await.unwrap()];
+    two.sort_by_key(|e| format!("{e:?}"));
+    two
+}
+
+#[tokio::test]
+async fn the_newest_voice_is_warmed_at_start_and_a_jobs_voice_when_it_ends() {
+    let fx = Fx::new();
+    let newest = fx.add_voice(Language::Hi);
+    let (b, mut warm) = warm_gated();
+    let engine = Engine::start(fx.ctx(b, EngineConfig::default())).unwrap();
+    let hi = fx.voice_ref(newest, Language::Hi);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(hi.clone()))
+    );
+    warm.release_prepare(1);
+    assert_eq!(warm.next().await, Some(WarmEvent::PrepareEnded(hi, Ok(()))));
+
+    // A job for the older voice runs, then that voice is warmed for the next one.
+    let mut events = engine.subscribe();
+    let job = fx.new_job("hello there", Language::En, 19);
+    engine.enqueue(job.clone()).await.unwrap();
+    assert_eq!(finished(&mut events, job.id).await, JobState::Succeeded);
+    let en = fx.voice_ref(fx.voice, Language::En);
+    assert_eq!(warm.next().await, Some(WarmEvent::PrepareStarted(en)));
+}
+
+#[tokio::test]
+async fn a_job_for_another_voice_cancels_the_warm_up() {
+    let fx = Fx::new();
+    let newest = fx.add_voice(Language::En);
+    let (b, mut warm) = warm_gated();
+    let engine = Engine::start(fx.ctx(b, EngineConfig::default())).unwrap();
+    let warming = fx.voice_ref(newest, Language::En);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(warming.clone()))
+    );
+    let mut events = engine.subscribe();
+    let job = fx.new_job("for the older voice", Language::En, 19);
+    engine.enqueue(job.clone()).await.unwrap();
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareEnded(
+            warming,
+            Err(BackendError::Cancelled)
+        ))
+    );
+    assert_eq!(finished(&mut events, job.id).await, JobState::Succeeded);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(
+            fx.voice_ref(fx.voice, Language::En)
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_job_for_the_warming_voice_lets_the_warm_up_finish() {
+    let fx = Fx::new();
+    let (b, mut warm) = warm_gated();
+    let engine = Engine::start(fx.ctx(b, EngineConfig::default())).unwrap();
+    let voice = fx.voice_ref(fx.voice, Language::En);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(voice.clone()))
+    );
+    let mut events = engine.subscribe();
+    let job = fx.new_job("same voice", Language::En, 19);
+    engine.enqueue(job.clone()).await.unwrap();
+    assert_eq!(finished(&mut events, job.id).await, JobState::Succeeded);
+    // Not cancelled, and not started twice: the job's end finds it already warming.
+    warm.release_prepare(1);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareEnded(voice, Ok(())))
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_prepare_switches_the_warm_up_to_that_voice() {
+    let fx = Fx::new();
+    let (b, mut warm) = warm_gated();
+    let engine = Engine::start(fx.ctx(b, EngineConfig::default())).unwrap();
+    let first = fx.voice_ref(fx.voice, Language::En);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(first.clone()))
+    );
+    let enrolled = fx.add_voice(Language::Hi);
+    engine.prepare(enrolled).await;
+    let second = fx.voice_ref(enrolled, Language::Hi);
+    assert_eq!(
+        next_two(&mut warm).await,
+        [
+            WarmEvent::PrepareEnded(first, Err(BackendError::Cancelled)),
+            WarmEvent::PrepareStarted(second),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn releasing_a_voice_cancels_its_warm_up_and_stops_its_engine() {
+    let fx = Fx::new();
+    let (b, mut warm) = warm_gated();
+    let engine = Engine::start(fx.ctx(b, EngineConfig::default())).unwrap();
+    let voice = fx.voice_ref(fx.voice, Language::En);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(voice.clone()))
+    );
+    engine.release_voice(fx.voice).await;
+    assert_eq!(
+        next_two(&mut warm).await,
+        [
+            WarmEvent::PrepareEnded(voice.clone(), Err(BackendError::Cancelled)),
+            WarmEvent::Released(Some(voice.reference)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn shutdown_stops_the_warm_engine() {
+    let fx = Fx::new();
+    let (b, mut warm) = warm_gated();
+    let engine = Engine::start(fx.ctx(b, EngineConfig::default())).unwrap();
+    let voice = fx.voice_ref(fx.voice, Language::En);
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(voice.clone()))
+    );
+    engine.shutdown().await;
+    assert_eq!(
+        next_two(&mut warm).await,
+        [
+            WarmEvent::PrepareEnded(voice, Err(BackendError::Cancelled)),
+            WarmEvent::Released(None),
+        ]
+    );
 }

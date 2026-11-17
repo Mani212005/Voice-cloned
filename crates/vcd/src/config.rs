@@ -39,6 +39,12 @@ pub struct EngineCfg {
     /// Holds `files/` (model files) and `runtime/` (the unpacked CrispASR release), as
     /// laid out by `cargo xtask fetch-models`.
     pub models_dir: PathBuf,
+    /// Keep one engine process warm (models loaded, voice encoded) across chunks and
+    /// jobs, restarting it before it outgrows the RAM budget. `false` runs a cold engine
+    /// process per chunk. The audio is identical either way.
+    pub warm: bool,
+    /// Longest wait for a warm engine to start answering.
+    pub start_timeout_s: u64,
     /// Overrides the recipe's thread count.
     pub threads: Option<u32>,
     pub nice: i32,
@@ -71,6 +77,8 @@ impl Default for EngineCfg {
     fn default() -> Self {
         Self {
             models_dir: PathBuf::from("models"),
+            warm: true,
+            start_timeout_s: 300,
             threads: None,
             nice: 10,
             queue_capacity: 16,
@@ -120,6 +128,9 @@ impl Config {
         if !(0..=19).contains(&self.engine.nice) {
             bail!("nice must be 0-19");
         }
+        if self.engine.start_timeout_s == 0 {
+            bail!("start_timeout_s must be positive");
+        }
         Ok(())
     }
 }
@@ -134,12 +145,14 @@ mod tests {
         c.validate().unwrap();
         assert_eq!(c.server.listen.to_string(), "127.0.0.1:8740");
         assert_eq!(c.storage.output_ttl_hours, 24);
+        assert!(c.engine.warm);
     }
 
     #[test]
     fn parses_partial_files_and_rejects_unknown_keys() {
-        let c: Config = toml::from_str("[engine]\nthreads = 4\n").unwrap();
+        let c: Config = toml::from_str("[engine]\nthreads = 4\nwarm = false\n").unwrap();
         assert_eq!(c.engine.threads, Some(4));
+        assert!(!c.engine.warm);
         assert_eq!(c.engine.nice, 10);
         assert!(toml::from_str::<Config>("[engine]\nthreadz = 4\n").is_err());
         assert!(toml::from_str::<Config>("[nope]\n").is_err());
