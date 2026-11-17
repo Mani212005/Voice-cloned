@@ -100,12 +100,12 @@ references, outputs or recordings; tests use synthetic audio only.
 
 Workspace: `crates/vc-core` (ids, job states, error codes), `vc-text` (chunk planner),
 `vc-audio` (WAV), `vc-backend` (`Backend` trait, `CrispWarmBackend` and its restart
-policy, `CrispCliBackend`, fakes, process control), `vc-store` (SQLite + data dir), `vc-engine` (scheduler: one engine slot, queue,
-cancel, recovery, retention), `vc-api` (axum routes), `vcd` (the binary), `xtask`.
+policy, `CrispCliBackend`, fakes, process control), `vc-store` (SQLite + data dir),
+`vc-engine` (scheduler: one engine slot, queue, cancel, recovery, retention), `vc-api`
+(axum routes), `vcd` (the binary), `xtask`.
 
 Not in v1 yet: encryption at rest and crypto-erase, server-sent progress events and
 per-chunk downloads, `/v1/speech` streaming, C2PA signing of the joined output, metrics,
 a systemd unit with an engine sandbox, API keys, a baked voice pack that survives engine
-restarts, Opus
-output, an OpenAI-compatible shim, and an option for the spoken AI disclaimer (always off
-in v1).
+restarts, Opus output, an OpenAI-compatible shim, and an option for the spoken AI
+disclaimer (always off in v1).
