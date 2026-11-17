@@ -111,6 +111,7 @@ impl FakeBackend {
                 sample_rate_hz: FAKE_SAMPLE_RATE,
                 channels: 1,
                 max_chunk_words,
+                max_chunk_words_per_language: Default::default(),
                 max_chunk_chars,
                 concurrency: 1,
                 ram_budget_kib: 1_100_000,
@@ -141,6 +142,14 @@ impl FakeBackend {
         let gate = Arc::new(Semaphore::new(0));
         self.warm = Some((tx, gate.clone()));
         (self, WarmControl { events, gate })
+    }
+
+    /// A lower word cap for `language`.
+    pub fn with_language_cap(mut self, language: Language, max_chunk_words: usize) -> Self {
+        self.capabilities
+            .max_chunk_words_per_language
+            .insert(language, max_chunk_words);
+        self
     }
 
     /// Every chunk waits for [`FakeControl::release`] (or cancellation) before finishing.

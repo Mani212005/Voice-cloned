@@ -59,7 +59,7 @@ async fn run(
     let plan = vc_text::plan(
         &text,
         PlanLimits {
-            max_words: caps.max_chunk_words,
+            max_words: caps.max_chunk_words_for(job.language),
             max_chars: caps.max_chunk_chars,
         },
     )

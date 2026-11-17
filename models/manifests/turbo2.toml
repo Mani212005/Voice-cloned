@@ -52,11 +52,18 @@ MALLOC_MMAP_THRESHOLD_ = "65536"
 # 1.1 GB in the unit of the evidence base: ru_maxrss in KiB divided by 1e6.
 # Measured peak for one chunk of 19 words or fewer: 1.00-1.07 GB.
 ram_budget_kib = 1100000
+# Peak RSS follows a chunk's audio length (measured, cold, with the malloc settings
+# above: 5.8 s 1.012 GB, 6.8 s 1.046 GB, 7.8 s 1.076 GB, 9.7 s 1.099 GB). These caps keep
+# a chunk's audio to about 8 s and every peak, cold or warm, at or under about 1.07 GB.
+# English speaks about 0.3 s per word; Hindi and Hinglish 0.5-0.7 s, so a 19-word Hindi
+# chunk reached 9.7 s and 1.126 GB without the malloc settings.
 max_chunk_words = 19
 max_chunk_chars = 200
+max_chunk_words_per_language = { hi = 14 }
 # A warm engine is restarted before a chunk when its peak RSS so far plus this headroom
-# would cross the budget. The largest growth of a warm engine's peak in one chunk was
-# 75 MB (a 19-word chunk after a one-word one); this leaves 25 MB of margin.
+# would cross the budget (so above 1.0 GB). A chunk lifts a warm engine's peak to about
+# the larger of its own cold peak (at most about 1.08 GB under the caps above) and the
+# engine's earlier peak, plus a few MB; the worst measured was 1.068 GB.
 restart_headroom_kib = 100000
 
 [reference]

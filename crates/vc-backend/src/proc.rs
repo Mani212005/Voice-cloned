@@ -434,7 +434,11 @@ mod tests {
     #[tokio::test]
     async fn a_held_child_that_exits_is_reaped_with_its_status() {
         let dir = tempfile::tempdir().unwrap();
-        let out = spawn(&sh("exit 4", dir.path())).unwrap().wait().await.unwrap();
+        let out = spawn(&sh("exit 4", dir.path()))
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
         assert_eq!(out.exit, ExitInfo::Code(4));
     }
 

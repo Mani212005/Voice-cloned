@@ -480,6 +480,38 @@ async fn an_enrolled_voice_is_warmed_and_a_deleted_one_released() {
 }
 
 #[tokio::test]
+async fn the_chunk_cap_follows_the_job_language_and_runs_end_to_end() {
+    let backend = FakeBackend::with_limits(4, 200).with_language_cap(vc_core::Language::Hi, 2);
+    let api = Api::new(
+        Arc::new(backend),
+        EngineConfig::default(),
+        ApiConfig::default(),
+    );
+    let voice = api.voice().await;
+    let mut events = api.engine.subscribe();
+    // The first sentence is a chunk of its own; the rest is cut at the language's cap.
+    let text = "Namaste ji. abhi main busy hoon.";
+    let en = api.job(&voice, "en", text).await;
+    assert_eq!(en.json()["chunks_total"], 2);
+    let hi = api.job(&voice, "hi", text).await;
+    assert_eq!(hi.json()["chunks_total"], 3);
+    let job = hi.json()["id"].as_str().unwrap().to_owned();
+    api.wait_finished(&mut events, &job).await;
+    let j = api.get(&format!("/v1/jobs/{job}")).await.json();
+    assert_eq!(
+        j["state"], "succeeded",
+        "the runner plans with the same cap"
+    );
+    let words: Vec<u64> = j["chunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["words"].as_u64().unwrap())
+        .collect();
+    assert_eq!(words, [2, 2, 2]);
+}
+
+#[tokio::test]
 async fn a_job_runs_to_a_downloadable_wav() {
     let api = Api::fake();
     let voice = api.voice().await;

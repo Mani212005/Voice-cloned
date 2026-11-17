@@ -1,7 +1,8 @@
 # Recipe `turbo2`
 
 The v1 voice engine: **Chatterbox V3 T3 (Q4_K) + Chatterbox Turbo S3Gen (Q4_K), 2 decoder
-steps**, run by the pinned CrispASR v0.8.53 CLI, one process per text chunk.
+steps**, run by the pinned CrispASR v0.8.53 release: one warm `--server` process reused
+across chunks and jobs (default), or one CLI process per chunk (`engine.warm = false`).
 
 The machine-readable recipe is [`models/manifests/turbo2.toml`](../../manifests/turbo2.toml)
 and the runtime pin is [`third_party/crispasr/PIN.toml`](../../../third_party/crispasr/PIN.toml).
@@ -36,18 +37,29 @@ cargo xtask verify         # re-check later; `vcd serve` also re-checks on every
 | `CRISPASR_S3GEN_FASTCONV` | 0 | `1` is faster in the vocoder but peaks at 1.094 GB on this recipe, too close to the budget. |
 | `-l` | `en`, or `hi` for Hindi and Hinglish | |
 | `-sl` | the reference's language, when it differs from `-l` | Cross-lingual cloning (an English reference speaking Hindi) runs T3 without guidance: better likeness and half the T3 cost. |
-| Chunk | 19 words or fewer, cut at sentence ends, then clause marks, then between words | Keeps every engine process within the budget. |
-| Process | one per chunk | A long-lived CrispASR server grew from 1.15 to 1.41 GB over 15 chunks; separate processes peak at 1.00-1.07 GB. |
+| Chunk | the first sentence alone; then 19 words or fewer (14 for `hi`), cut at sentence ends, then clause marks, then between words | Time to first audio grows with the first chunk. Peak RSS grows with a chunk's audio length, and these caps keep it to about 8 s. |
+| Process | one warm `--server` process, restarted before a chunk once its peak RSS is above 1.0 GB | Saves the model load and the reference encode (about 6 s idle, 15 s or more under load) on every chunk. Output is bit-identical to the CLI. |
+| `--no-punctuation` | server only | Otherwise the server downloads an unpinned punctuation model that TTS does not use. |
+| `MALLOC_ARENA_MAX=1`, `MALLOC_TRIM_THRESHOLD_=0`, `MALLOC_MMAP_THRESHOLD_=65536` | engine environment | With glibc's defaults a warm engine's RSS crept about 22 MB per request and never came back (1.41 GB after 15 chunks). With these it levels off at the largest chunk served. |
 
 ## Budget
 
 1.1 GB of peak RSS per engine process, in the unit the measurements used (`ru_maxrss` in
-KiB divided by 1e6, so `ram_budget_kib = 1100000`). `vcd` reads every chunk's peak from
-`wait4` and fails the job with `memory_budget_exceeded` if a chunk goes over.
+KiB divided by 1e6, so `ram_budget_kib = 1100000`). `vcd` reads every chunk's peak (from
+`wait4`, or the warm engine's `VmHWM`) and fails the job with `memory_budget_exceeded` if
+a chunk goes over.
+
+Measured with the malloc settings (cold CLI, one chunk each): 5.8 s of audio 1.012 GB,
+6.8 s 1.046 GB, 7.8 s 1.076 GB, 9.7 s 1.099 GB (1.126 GB without the malloc settings,
+which is why Hindi chunks are capped at 14 words). A warm engine's peak after a chunk is
+at most about the cold peak of that chunk or its own earlier peak, whichever is higher,
+plus a few MB: after the one-word warm-up it holds 0.917 GB, and pushed past its restart
+line with long Hindi chunks it reached 1.068 GB. `restart_headroom_kib = 100000` restarts
+it before any chunk once its peak is above 1.0 GB.
 
 ## Not covered yet
 
 - A real-engine golden test (exact PCM hash per CPU class, HNR floor, RSS ceiling) as an
   automated tier.
-- A persistent engine worker through the C ABI, a baked voice-conditioning cache, and a
-  GPU build.
+- A baked voice-conditioning pack, so a restarted engine skips the reference encode
+  (the only baker for this model is upstream's Python/torch), and a GPU build.

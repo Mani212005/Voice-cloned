@@ -50,13 +50,17 @@ pub struct EngineSettings {
     pub env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budget {
     /// Ceiling on any engine process's peak RSS (`ru_maxrss` / `VmHWM`), in KiB.
     pub ram_budget_kib: u64,
     pub max_chunk_words: usize,
     pub max_chunk_chars: usize,
+    /// Lower word caps for languages that speak more slowly than `max_chunk_words`
+    /// allows within the budget.
+    #[serde(default)]
+    pub max_chunk_words_per_language: BTreeMap<Language, usize>,
     /// A warm engine is restarted before a chunk when its peak RSS so far plus this
     /// would cross `ram_budget_kib`.
     pub restart_headroom_kib: u64,
@@ -163,6 +167,14 @@ impl RecipeManifest {
         }
         if self.budget.max_chunk_words == 0 || self.budget.max_chunk_chars == 0 {
             return invalid("chunk caps must be positive");
+        }
+        if self
+            .budget
+            .max_chunk_words_per_language
+            .values()
+            .any(|&w| w == 0 || w > self.budget.max_chunk_words)
+        {
+            return invalid("per-language word caps must be positive and at most max_chunk_words");
         }
         if self.budget.restart_headroom_kib >= self.budget.ram_budget_kib {
             return invalid("restart_headroom_kib must be below ram_budget_kib");
@@ -285,6 +297,10 @@ mod tests {
         assert_eq!(m.engine.seed, 0);
         assert_eq!(m.engine.env.get("CRISPASR_S3GEN_FASTCONV").unwrap(), "0");
         assert_eq!(m.budget.max_chunk_words, 19);
+        assert_eq!(
+            m.budget.max_chunk_words_per_language,
+            BTreeMap::from([(Language::Hi, 14)])
+        );
         assert_eq!(m.budget.ram_budget_kib, 1_100_000);
         assert_eq!(m.budget.restart_headroom_kib, 100_000);
         assert_eq!(m.engine.env.get("MALLOC_ARENA_MAX").unwrap(), "1");

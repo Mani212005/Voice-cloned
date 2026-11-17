@@ -8,6 +8,7 @@
 //! [`FakeBackend`] is the in-process test double; the `fake-engine` binary is a stand-in
 //! for `crispasr` (CLI and server modes) used to test the real backends.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -111,7 +112,10 @@ pub struct Capabilities {
     pub languages: Vec<Language>,
     pub sample_rate_hz: u32,
     pub channels: u16,
+    /// Word cap of a chunk; see [`Capabilities::max_chunk_words_for`].
     pub max_chunk_words: usize,
+    /// Lower word caps for some languages, so every chunk stays within the RAM budget.
+    pub max_chunk_words_per_language: BTreeMap<Language, usize>,
     pub max_chunk_chars: usize,
     /// Engine processes that may run at once.
     pub concurrency: u32,
@@ -121,6 +125,16 @@ pub struct Capabilities {
     pub watermark: &'static str,
     pub reference_min_s: f64,
     pub reference_max_s: f64,
+}
+
+impl Capabilities {
+    /// Word cap of a chunk in `language`.
+    pub fn max_chunk_words_for(&self, language: Language) -> usize {
+        self.max_chunk_words_per_language
+            .get(&language)
+            .copied()
+            .unwrap_or(self.max_chunk_words)
+    }
 }
 
 /// Provenance of a backend: what produced the audio.

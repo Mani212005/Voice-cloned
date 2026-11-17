@@ -39,9 +39,12 @@ pub enum PlanError {
 
 /// Normalize `text` and cut it into engine chunks within `limits`.
 ///
-/// Sentences are packed greedily. A sentence over the limits is cut at the last clause
-/// punctuation that fits, otherwise at the last word that fits. Joining the chunk texts
-/// with single spaces gives the normalized text with line breaks turned into spaces.
+/// The first sentence is a chunk of its own: time to first audio grows with the length of
+/// the first chunk, so a short greeting is heard while the rest is still synthesizing.
+/// The following sentences are packed greedily. A sentence over the limits is cut at the
+/// last clause punctuation that fits, otherwise at the last word that fits. Joining the
+/// chunk texts with single spaces gives the normalized text with line breaks turned into
+/// spaces.
 pub fn plan(text: &str, limits: PlanLimits) -> Result<ChunkPlan, PlanError> {
     if limits.max_words == 0 || limits.max_chars == 0 {
         return Err(PlanError::InvalidLimits);
@@ -54,21 +57,24 @@ pub fn plan(text: &str, limits: PlanLimits) -> Result<ChunkPlan, PlanError> {
 
     let mut chunks: Vec<Vec<&str>> = Vec::new();
     let mut current: Vec<&str> = Vec::new();
-    for sentence in sentences {
+    for (i, sentence) in sentences.into_iter().enumerate() {
         if fits(&current, &sentence, limits) {
             current.extend_from_slice(&sentence);
-            continue;
+        } else {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            let mut rest: &[&str] = &sentence;
+            while !fits(&[], rest, limits) {
+                let cut = cut_point(rest, limits)?;
+                chunks.push(rest[..cut].to_vec());
+                rest = &rest[cut..];
+            }
+            current.extend_from_slice(rest);
         }
-        if !current.is_empty() {
+        if i == 0 {
             chunks.push(std::mem::take(&mut current));
         }
-        let mut rest: &[&str] = &sentence;
-        while !fits(&[], rest, limits) {
-            let cut = cut_point(rest, limits)?;
-            chunks.push(rest[..cut].to_vec());
-            rest = &rest[cut..];
-        }
-        current.extend_from_slice(rest);
     }
     if !current.is_empty() {
         chunks.push(current);
@@ -163,10 +169,46 @@ mod tests {
     }
 
     #[test]
-    fn packs_short_sentences_together() {
+    fn the_first_sentence_is_a_chunk_of_its_own() {
         let p = plan("Hi there. How are you? Fine!", TURBO2).unwrap();
-        assert_eq!(texts(&p), ["Hi there. How are you? Fine!"]);
-        assert_eq!(p.chunks[0].words, 6);
+        assert_eq!(texts(&p), ["Hi there.", "How are you? Fine!"]);
+        assert_eq!(p.chunks[0].words, 2);
+        let p = plan(
+            "Namaste! Abhi main busy hoon. Baad mein call karta hoon.",
+            TURBO2,
+        )
+        .unwrap();
+        assert_eq!(
+            texts(&p),
+            [
+                "Namaste!",
+                "Abhi main busy hoon. Baad mein call karta hoon."
+            ]
+        );
+        let p = plan("नमस्ते। मैं अभी व्यस्त हूँ।", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["नमस्ते।", "मैं अभी व्यस्त हूँ।"]);
+    }
+
+    #[test]
+    fn a_single_sentence_is_one_chunk() {
+        let p = plan("Hi there", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Hi there"]);
+    }
+
+    #[test]
+    fn a_long_first_sentence_is_cut_and_its_remainder_does_not_pack_with_the_next() {
+        let limits = PlanLimits {
+            max_words: 4,
+            max_chars: 200,
+        };
+        let p = plan("a b c d e f. g. h.", limits).unwrap();
+        assert_eq!(texts(&p), ["a b c d", "e f.", "g. h."]);
+    }
+
+    #[test]
+    fn later_short_sentences_are_packed_together() {
+        let p = plan("Hi. One two. Three four. Five!", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Hi.", "One two. Three four. Five!"]);
     }
 
     #[test]
@@ -215,8 +257,8 @@ mod tests {
             max_words: 4,
             max_chars: 200,
         };
-        let p = plan("a b c d e f. g.", limits).unwrap();
-        assert_eq!(texts(&p), ["a b c d", "e f. g."]);
+        let p = plan("x. a b c d e f. g.", limits).unwrap();
+        assert_eq!(texts(&p), ["x.", "a b c d", "e f. g."]);
     }
 
     #[test]
