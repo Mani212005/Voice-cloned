@@ -1,15 +1,20 @@
 //! Response bodies.
 
-use std::time::{Duration, UNIX_EPOCH};
-
 use serde::Serialize;
+use time::OffsetDateTime;
+use time::macros::format_description;
 use vc_backend::BackendInfo;
 use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, VoiceId};
 use vc_store::{ChunkRow, JobRow, VoiceRow};
 
 pub fn rfc3339(ms: i64) -> String {
-    let t = UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0));
-    humantime::format_rfc3339_millis(t).to_string()
+    let nanos = i128::from(ms.max(0)) * 1_000_000;
+    OffsetDateTime::from_unix_timestamp_nanos(nanos)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .format(format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        ))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Serialize)]

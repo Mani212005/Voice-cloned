@@ -12,10 +12,10 @@ workspace = true
 [dependencies]
 axum = { version = "0.8.9", features = ["multipart"] }
 hex = "0.4.3"
-humantime = "2.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+time = { version = "0.3.55", features = ["formatting", "macros"] }
 tokio = "1.54.1"
 tracing = "0.1.44"
 vc-audio = { version = "0.1.0", path = "../vc-audio" }
