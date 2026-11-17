@@ -1,8 +1,10 @@
-//! The v1 backend: the pinned CrispASR CLI, one process per chunk.
+//! The cold backend: the pinned CrispASR CLI, one process per chunk.
 //!
-//! One process per chunk keeps every chunk's peak RSS at the measured 1.00-1.07 GB (a
-//! long-lived engine grew past the 1.1 GB budget), makes cancel a process-group kill, and
-//! contains engine crashes.
+//! Every chunk pays for loading the models and encoding the reference (about 6 s on an
+//! idle laptop, 15 s or more under load), which is why vcd normally runs
+//! [`crate::CrispWarmBackend`]. This one stays as the `engine.warm = false` fallback: a
+//! fresh process per chunk keeps every chunk's peak RSS at the measured 1.00-1.07 GB,
+//! makes cancel a process-group kill, and contains engine crashes.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -38,44 +40,84 @@ pub struct CrispCliBackend {
     info: BackendInfo,
 }
 
+/// What the API may promise for a CrispASR backend of this recipe.
+pub(crate) fn capabilities(manifest: &RecipeManifest) -> Capabilities {
+    Capabilities {
+        backend_id: manifest.id.clone(),
+        languages: manifest.engine.languages.clone(),
+        sample_rate_hz: manifest.engine.sample_rate_hz,
+        channels: 1,
+        max_chunk_words: manifest.budget.max_chunk_words,
+        max_chunk_words_per_language: manifest.budget.max_chunk_words_per_language.clone(),
+        max_chunk_chars: manifest.budget.max_chunk_chars,
+        concurrency: 1,
+        ram_budget_kib: manifest.budget.ram_budget_kib,
+        deterministic: true,
+        watermark: "crispasr-builtin",
+        reference_min_s: manifest.reference.min_s,
+        reference_max_s: manifest.reference.max_s,
+    }
+}
+
+pub(crate) fn backend_info(
+    manifest: &RecipeManifest,
+    pin: &RuntimePin,
+    threads: u32,
+) -> BackendInfo {
+    BackendInfo {
+        backend_id: manifest.id.clone(),
+        runtime: Some(RuntimeInfo {
+            name: pin.name.clone(),
+            version: pin.version.clone(),
+            commit: pin.commit.clone(),
+            tarball_sha256: pin.linux_x86_64.sha256.clone(),
+        }),
+        models: manifest
+            .files
+            .iter()
+            .map(|f| ModelInfo {
+                role: f.role.clone(),
+                name: f.name.clone(),
+                sha256: f.sha256.clone(),
+            })
+            .collect(),
+        seed: manifest.engine.seed,
+        tts_steps: manifest.engine.tts_steps,
+        threads,
+    }
+}
+
+pub(crate) fn model_path(manifest: &RecipeManifest, model_dir: &Path, role: &str) -> PathBuf {
+    let name = manifest.file(role).map_or("", |f| f.name.as_str());
+    model_dir.join(name)
+}
+
+/// The engine environment: the manifest's variables, then HOME, the cache and TMPDIR
+/// under `home` (so the engine neither loads unpinned cached models nor leaves
+/// voice-derived files in shared places), then `extra`.
+pub(crate) fn engine_env(
+    manifest: &RecipeManifest,
+    home: &Path,
+    extra: &[(String, String)],
+) -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = manifest
+        .engine
+        .env
+        .iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+    env.push(("HOME".into(), home.to_owned().into()));
+    env.push(("XDG_CACHE_HOME".into(), home.join("cache").into()));
+    env.push(("TMPDIR".into(), home.join("tmp").into()));
+    env.extend(extra.iter().map(|(k, v)| (k.into(), v.into())));
+    env
+}
+
 impl CrispCliBackend {
     pub fn new(manifest: RecipeManifest, pin: &RuntimePin, options: CrispOptions) -> Self {
         let threads = options.threads.unwrap_or(manifest.engine.threads);
-        let capabilities = Capabilities {
-            backend_id: manifest.id.clone(),
-            languages: manifest.engine.languages.clone(),
-            sample_rate_hz: manifest.engine.sample_rate_hz,
-            channels: 1,
-            max_chunk_words: manifest.budget.max_chunk_words,
-            max_chunk_chars: manifest.budget.max_chunk_chars,
-            concurrency: 1,
-            ram_budget_kib: manifest.budget.ram_budget_kib,
-            deterministic: true,
-            watermark: "crispasr-builtin",
-            reference_min_s: manifest.reference.min_s,
-            reference_max_s: manifest.reference.max_s,
-        };
-        let info = BackendInfo {
-            backend_id: manifest.id.clone(),
-            runtime: Some(RuntimeInfo {
-                name: pin.name.clone(),
-                version: pin.version.clone(),
-                commit: pin.commit.clone(),
-                tarball_sha256: pin.linux_x86_64.sha256.clone(),
-            }),
-            models: manifest
-                .files
-                .iter()
-                .map(|f| ModelInfo {
-                    role: f.role.clone(),
-                    name: f.name.clone(),
-                    sha256: f.sha256.clone(),
-                })
-                .collect(),
-            seed: manifest.engine.seed,
-            tts_steps: manifest.engine.tts_steps,
-            threads,
-        };
+        let capabilities = capabilities(&manifest);
+        let info = backend_info(&manifest, pin, threads);
         Self {
             manifest,
             options,
@@ -89,8 +131,7 @@ impl CrispCliBackend {
     }
 
     fn model_path(&self, role: &str) -> PathBuf {
-        let name = self.manifest.file(role).map_or("", |f| f.name.as_str());
-        self.options.model_dir.join(name)
+        model_path(&self.manifest, &self.options.model_dir, role)
     }
 
     /// The exact argv for one chunk. Text and paths are single argv elements passed to
@@ -138,24 +179,11 @@ impl CrispCliBackend {
     /// private directory, so the engine neither loads unpinned cached models nor leaves
     /// voice-derived files in shared places.
     pub fn env(&self, req: &ChunkRequest) -> Vec<(OsString, OsString)> {
-        let home = req.work_dir.join("engine-home");
-        let mut env: Vec<(OsString, OsString)> = self
-            .manifest
-            .engine
-            .env
-            .iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        env.push(("HOME".into(), home.clone().into()));
-        env.push(("XDG_CACHE_HOME".into(), home.join("cache").into()));
-        env.push(("TMPDIR".into(), home.join("tmp").into()));
-        env.extend(
-            self.options
-                .extra_env
-                .iter()
-                .map(|(k, v)| (k.into(), v.into())),
-        );
-        env
+        engine_env(
+            &self.manifest,
+            &req.work_dir.join("engine-home"),
+            &self.options.extra_env,
+        )
     }
 
     async fn run_chunk(
@@ -329,6 +357,9 @@ mod tests {
             env,
             [
                 ("CRISPASR_S3GEN_FASTCONV".into(), "0".into()),
+                ("MALLOC_ARENA_MAX".into(), "1".into()),
+                ("MALLOC_MMAP_THRESHOLD_".into(), "65536".into()),
+                ("MALLOC_TRIM_THRESHOLD_".into(), "0".into()),
                 ("HOME".into(), "/w/engine-home".into()),
                 ("XDG_CACHE_HOME".into(), "/w/engine-home/cache".into()),
                 ("TMPDIR".into(), "/w/engine-home/tmp".into()),
@@ -341,6 +372,8 @@ mod tests {
         let c = backend().capabilities().clone();
         assert_eq!(c.backend_id, "turbo2");
         assert_eq!(c.max_chunk_words, 19);
+        assert_eq!(c.max_chunk_words_for(Language::En), 19);
+        assert_eq!(c.max_chunk_words_for(Language::Hi), 14);
         assert_eq!(c.concurrency, 1);
         assert_eq!(c.sample_rate_hz, 24_000);
     }

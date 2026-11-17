@@ -87,6 +87,27 @@ proptest! {
     }
 
     #[test]
+    fn the_first_chunk_never_reaches_past_the_first_sentence(t in text(), l in limits()) {
+        if let Ok(p) = plan(&t, l) {
+            let normalized = normalize(&t);
+            let first_line = normalized.split('\n').find(|l| !l.trim().is_empty()).unwrap();
+            let words: Vec<&str> = p.chunks[0].text.split(' ').collect();
+            // Within the first line, and no sentence ends before its last word.
+            prop_assert!(first_line.trim_start().starts_with(p.chunks[0].text.as_str()));
+            let ends = ['?', '!', '\u{0964}'];
+            let weak = ["dr.", "mr.", "mrs.", "ms.", "prof.", "st.", "no.", "vs.", "etc.", "e.g.", "i.e."];
+            for w in &words[..words.len() - 1] {
+                let initial = w.chars().count() == 2 && w.ends_with('.');
+                let abbreviation = weak.contains(&w.to_lowercase().as_str());
+                prop_assert!(
+                    !w.ends_with(ends) && (!w.ends_with('.') || initial || abbreviation),
+                    "first chunk {:?} spans sentences", p.chunks[0].text
+                );
+            }
+        }
+    }
+
+    #[test]
     fn planning_is_deterministic(t in text(), l in limits()) {
         prop_assert_eq!(plan(&t, l), plan(&t, l));
     }

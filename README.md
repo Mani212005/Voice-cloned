@@ -43,14 +43,22 @@ uv run voice-clone hfp run                 # answer after 20 s of ringing
 
 `vcd` is a local HTTP service, written in Rust, that clones the owner's voice from one
 reference clip and speaks English or Hindi/Hinglish text with it. It runs on this
-machine only (it refuses to listen on anything but loopback) and works in batch: a job
-takes roughly 10-15 s to its first chunk of audio and runs slower than real time on this
-laptop's CPU.
+machine only (it refuses to listen on anything but loopback) and works in batch: a job's
+first sentence is heard after roughly 10-13 s, and the rest runs slower than real time on
+this laptop's CPU.
 
-The speech engine is the pinned CrispASR v0.8.53 CLI with the `turbo2` recipe (Chatterbox
-V3 T3 + Turbo S3Gen, both Q4_K, 2 decoder steps). `vcd` runs it as one child process per
-text chunk of 19 words or fewer, one at a time, and fails a job if any chunk's peak RSS
-goes over the 1.1 GB budget. See [`models/recipes/turbo2/README.md`](models/recipes/turbo2/README.md).
+The speech engine is the pinned CrispASR v0.8.53 release with the `turbo2` recipe
+(Chatterbox V3 T3 + Turbo S3Gen, both Q4_K, 2 decoder steps). `vcd` keeps one engine
+process warm (its `--server` mode: models loaded, the voice already encoded) and feeds it
+one text chunk at a time: the first sentence alone, then chunks of 19 words or fewer (14
+for Hindi). While idle it gets the engine ready for the voice used next, and it restarts
+the engine before any chunk that could take its peak RSS over the 1.1 GB budget; a chunk
+that still goes over fails its job. `engine.warm = false` in `vcd.toml` runs a cold CLI
+process per chunk instead; the audio is identical. The chunk plan differs from v1's, so
+a job accepted by the v1 binary and still queued or running at upgrade fails with
+"chunk plan changed since the job was accepted" and must be resubmitted; restart the
+service when idle. See
+[`models/recipes/turbo2/README.md`](models/recipes/turbo2/README.md).
 
 ```sh
 cargo xtask fetch-models          # model files + engine runtime into models/ (gitignored), verified
@@ -91,12 +99,13 @@ private HOME, cache and TMPDIR per job. Nothing is sent off the machine. Never c
 references, outputs or recordings; tests use synthetic audio only.
 
 Workspace: `crates/vc-core` (ids, job states, error codes), `vc-text` (chunk planner),
-`vc-audio` (WAV), `vc-backend` (`Backend` trait, `CrispCliBackend`, fakes, process
-control), `vc-store` (SQLite + data dir), `vc-engine` (scheduler: one engine slot, queue,
-cancel, recovery, retention), `vc-api` (axum routes), `vcd` (the binary), `xtask`.
+`vc-audio` (WAV), `vc-backend` (`Backend` trait, `CrispWarmBackend` and its restart
+policy, `CrispCliBackend`, fakes, process control), `vc-store` (SQLite + data dir),
+`vc-engine` (scheduler: one engine slot, queue, cancel, recovery, retention), `vc-api`
+(axum routes), `vcd` (the binary), `xtask`.
 
 Not in v1 yet: encryption at rest and crypto-erase, server-sent progress events and
 per-chunk downloads, `/v1/speech` streaming, C2PA signing of the joined output, metrics,
-a systemd unit with an engine sandbox, API keys, a persistent C-ABI engine worker, Opus
-output, an OpenAI-compatible shim, and an option for the spoken AI disclaimer (always off
-in v1).
+a systemd unit with an engine sandbox, API keys, a baked voice pack that survives engine
+restarts, Opus output, an OpenAI-compatible shim, and an option for the spoken AI
+disclaimer (always off in v1).

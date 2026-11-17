@@ -68,6 +68,7 @@ pub enum ProcError {
 }
 
 /// Kills the process group if the run is abandoned before the child is reaped.
+#[derive(Debug)]
 struct GroupGuard {
     pgid: libc::pid_t,
     armed: bool,
@@ -90,18 +91,66 @@ impl Drop for GroupGuard {
     }
 }
 
-/// Spawn `cmd` and wait for it, killing its whole process group on `cancel`.
-pub async fn run(
-    cmd: &EngineCommand,
-    cancel: &CancellationToken,
-) -> Result<ProcOutcome, ProcError> {
-    if cancel.is_cancelled() {
-        return Err(ProcError::Cancelled(ProcOutcome {
-            exit: ExitInfo::Signal(libc::SIGKILL),
-            peak_rss_kib: 0,
-            wall: Duration::ZERO,
-        }));
+/// A spawned engine process that has not been reaped yet. Dropping it kills the whole
+/// process group (the zombie is then left to [`EngineChild::kill_and_reap`] or to the
+/// exit of vcd).
+#[derive(Debug)]
+pub struct EngineChild {
+    pid: libc::pid_t,
+    guard: GroupGuard,
+    started: Instant,
+}
+
+impl EngineChild {
+    pub fn pid(&self) -> libc::pid_t {
+        self.pid
     }
+
+    /// The child's peak RSS so far (`VmHWM`), in KiB: the same number `ru_maxrss` will
+    /// report once it is reaped.
+    pub fn peak_rss_kib(&self) -> std::io::Result<u64> {
+        peak_rss_kib(self.pid)
+    }
+
+    /// Reap the child if it has exited, without blocking.
+    pub fn try_reap(&mut self) -> std::io::Result<Option<ProcOutcome>> {
+        match wait4_flags(self.pid, libc::WNOHANG)? {
+            None => Ok(None),
+            Some((exit, peak_rss_kib)) => Ok(Some(self.reaped(exit, peak_rss_kib))),
+        }
+    }
+
+    /// Wait for the child to exit on its own.
+    pub async fn wait(mut self) -> Result<ProcOutcome, ProcError> {
+        let pid = self.pid;
+        let (exit, peak_rss_kib) = tokio::task::spawn_blocking(move || wait4(pid))
+            .await
+            .map_err(|e| ProcError::Wait(std::io::Error::other(e)))?
+            .map_err(ProcError::Wait)?;
+        Ok(self.reaped(exit, peak_rss_kib))
+    }
+
+    /// Kill the whole process group and reap the child.
+    pub async fn kill_and_reap(self) -> Result<ProcOutcome, ProcError> {
+        self.guard.kill();
+        self.wait().await
+    }
+
+    fn reaped(&mut self, exit: ExitInfo, peak_rss_kib: u64) -> ProcOutcome {
+        // Reaped. Also kill anything the engine left behind in its group.
+        self.guard.kill();
+        self.guard.armed = false;
+        ProcOutcome {
+            exit,
+            peak_rss_kib,
+            wall: self.started.elapsed(),
+        }
+    }
+}
+
+/// Spawn `cmd` in its own process group: cleared environment, lowered priority,
+/// owner-only files, killed with its parent.
+pub fn spawn(cmd: &EngineCommand) -> Result<EngineChild, ProcError> {
     let spawn_err = |source| ProcError::Spawn {
         program: cmd.program.display().to_string(),
         source,
@@ -148,33 +197,45 @@ pub async fn run(
     let started = Instant::now();
     let child = command.spawn().map_err(spawn_err)?;
     let pid = child.id() as libc::pid_t;
-    // The child is reaped by wait4 below; std's handle must not reap it.
+    // The child is reaped by wait4; std's handle must not reap it.
     drop(child);
-    let mut guard = GroupGuard {
-        pgid: pid,
-        armed: true,
-    };
+    Ok(EngineChild {
+        pid,
+        guard: GroupGuard {
+            pgid: pid,
+            armed: true,
+        },
+        started,
+    })
+}
 
+/// Spawn `cmd` and wait for it, killing its whole process group on `cancel`.
+pub async fn run(
+    cmd: &EngineCommand,
+    cancel: &CancellationToken,
+) -> Result<ProcOutcome, ProcError> {
+    if cancel.is_cancelled() {
+        return Err(ProcError::Cancelled(ProcOutcome {
+            exit: ExitInfo::Signal(libc::SIGKILL),
+            peak_rss_kib: 0,
+            wall: Duration::ZERO,
+        }));
+    }
+    let child = spawn(cmd)?;
+    let pid = child.pid;
     let mut waiter = tokio::task::spawn_blocking(move || wait4(pid));
     let (result, cancelled) = tokio::select! {
         res = &mut waiter => (res, false),
         () = cancel.cancelled() => {
-            guard.kill();
+            child.guard.kill();
             (waiter.await, true)
         }
     };
+    let mut child = child;
     let (status, peak_rss_kib) = result
         .map_err(|e| ProcError::Wait(std::io::Error::other(e)))?
         .map_err(ProcError::Wait)?;
-    // Reaped. Also kill anything the engine left behind in its group.
-    guard.kill();
-    guard.armed = false;
-
-    let outcome = ProcOutcome {
-        exit: status,
-        peak_rss_kib,
-        wall: started.elapsed(),
-    };
+    let outcome = child.reaped(status, peak_rss_kib);
     if cancelled {
         Err(ProcError::Cancelled(outcome))
     } else {
@@ -182,15 +243,38 @@ pub async fn run(
     }
 }
 
+/// `VmHWM` of a live process, in KiB.
+pub fn peak_rss_kib(pid: libc::pid_t) -> std::io::Result<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.trim().strip_suffix("kB"))
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or_else(|| std::io::Error::other("no VmHWM in /proc status"))
+}
+
 fn wait4(pid: libc::pid_t) -> std::io::Result<(ExitInfo, u64)> {
+    loop {
+        if let Some(r) = wait4_flags(pid, 0)? {
+            return Ok(r);
+        }
+    }
+}
+
+/// One `wait4` call, retried on EINTR. `None` when `WNOHANG` finds the child running.
+fn wait4_flags(pid: libc::pid_t, flags: libc::c_int) -> std::io::Result<Option<(ExitInfo, u64)>> {
     let mut status: libc::c_int = 0;
     // SAFETY: rusage is plain old data; zeroed is a valid value.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     loop {
         // SAFETY: valid pointers to locals; pid is our own child.
-        let rc = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+        let rc = unsafe { libc::wait4(pid, &mut status, flags, &mut usage) };
         if rc == pid {
             break;
+        }
+        if rc == 0 {
+            return Ok(None);
         }
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::Interrupted {
@@ -202,7 +286,7 @@ fn wait4(pid: libc::pid_t) -> std::io::Result<(ExitInfo, u64)> {
     } else {
         ExitInfo::Signal(libc::WTERMSIG(status))
     };
-    Ok((exit, u64::try_from(usage.ru_maxrss).unwrap_or(0)))
+    Ok(Some((exit, u64::try_from(usage.ru_maxrss).unwrap_or(0))))
 }
 
 #[cfg(test)]
@@ -331,6 +415,31 @@ mod tests {
             libc::close(fd);
             rc == 1
         }
+    }
+
+    #[tokio::test]
+    async fn a_held_child_reports_its_peak_rss_and_is_killed_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn(&sh("exec sleep 1000", dir.path())).unwrap();
+        assert!(child.try_reap().unwrap().is_none(), "still running");
+        assert!(child.peak_rss_kib().unwrap() > 0);
+        let pid = child.pid();
+        let out = child.kill_and_reap().await.unwrap();
+        assert_eq!(out.exit, ExitInfo::Signal(libc::SIGKILL));
+        assert!(out.peak_rss_kib > 0);
+        // Reaped: not even a zombie is left.
+        assert!(peak_rss_kib(pid).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_held_child_that_exits_is_reaped_with_its_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = spawn(&sh("exit 4", dir.path()))
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        assert_eq!(out.exit, ExitInfo::Code(4));
     }
 
     #[tokio::test]

@@ -212,13 +212,15 @@ pub fn validate_engine_output(pcm: &MonoPcm, expected_rate: u32) -> Result<(), A
 /// Read engine output from a file and require mono, so a stereo file is not silently
 /// downmixed.
 pub fn read_engine_output(path: &Path, expected_rate: u32) -> Result<MonoPcm, AudioError> {
-    let file = std::io::BufReader::new(std::fs::File::open(path)?);
-    let reader = hound::WavReader::new(file)?;
-    if reader.spec().channels != 1 {
+    decode_engine_output(&std::fs::read(path)?, expected_rate)
+}
+
+/// [`read_engine_output`] for a WAV already in memory (a warm engine answers over HTTP).
+pub fn decode_engine_output(wav: &[u8], expected_rate: u32) -> Result<MonoPcm, AudioError> {
+    if hound::WavReader::new(wav)?.spec().channels != 1 {
         return Err(AudioError::Invalid("engine output is not mono".into()));
     }
-    drop(reader);
-    let pcm = read_wav_file(path)?;
+    let pcm = decode_wav(wav)?;
     validate_engine_output(&pcm, expected_rate)?;
     Ok(pcm)
 }

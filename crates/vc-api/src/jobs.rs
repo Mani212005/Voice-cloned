@@ -72,7 +72,7 @@ pub async fn create(
     let plan = vc_text::plan(
         &req.text,
         PlanLimits {
-            max_words: caps.max_chunk_words,
+            max_words: caps.max_chunk_words_for(language),
             max_chars: caps.max_chunk_chars,
         },
     )

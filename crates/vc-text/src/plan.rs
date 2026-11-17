@@ -3,6 +3,10 @@ use crate::normalize::normalize;
 /// Sentence terminators: Latin `.?!`, the Devanagari danda and double danda, and the
 /// ellipsis. A terminator only ends a sentence at the end of a word, so `3.5` stays whole.
 const SENTENCE_END: &[char] = &['.', '?', '!', '\u{0964}', '\u{0965}', '\u{2026}'];
+/// Abbreviations (lowercase, without the final period) that do not end the first sentence.
+const ABBREVIATIONS: &[&str] = &[
+    "dr", "mr", "mrs", "ms", "prof", "st", "no", "vs", "etc", "e.g", "i.e",
+];
 /// Clause punctuation where an over-long sentence may be cut.
 const CLAUSE_END: &[char] = &[',', ';', ':', '\u{060C}', '\u{2013}', '\u{2014}'];
 /// Closing quotes and brackets that may follow a terminator inside the same word.
@@ -39,9 +43,13 @@ pub enum PlanError {
 
 /// Normalize `text` and cut it into engine chunks within `limits`.
 ///
-/// Sentences are packed greedily. A sentence over the limits is cut at the last clause
-/// punctuation that fits, otherwise at the last word that fits. Joining the chunk texts
-/// with single spaces gives the normalized text with line breaks turned into spaces.
+/// The first sentence is a chunk of its own: time to first audio grows with the length of
+/// the first chunk, so a short greeting is heard while the rest is still synthesizing.
+/// An initial such as `J.` or an abbreviation such as `Dr.` does not end the first sentence.
+/// The following sentences are packed greedily. A sentence over the limits is cut at the
+/// last clause punctuation that fits, otherwise at the last word that fits. Joining the
+/// chunk texts with single spaces gives the normalized text with line breaks turned into
+/// spaces.
 pub fn plan(text: &str, limits: PlanLimits) -> Result<ChunkPlan, PlanError> {
     if limits.max_words == 0 || limits.max_chars == 0 {
         return Err(PlanError::InvalidLimits);
@@ -54,21 +62,24 @@ pub fn plan(text: &str, limits: PlanLimits) -> Result<ChunkPlan, PlanError> {
 
     let mut chunks: Vec<Vec<&str>> = Vec::new();
     let mut current: Vec<&str> = Vec::new();
-    for sentence in sentences {
+    for (i, sentence) in sentences.into_iter().enumerate() {
         if fits(&current, &sentence, limits) {
             current.extend_from_slice(&sentence);
-            continue;
+        } else {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            let mut rest: &[&str] = &sentence;
+            while !fits(&[], rest, limits) {
+                let cut = cut_point(rest, limits)?;
+                chunks.push(rest[..cut].to_vec());
+                rest = &rest[cut..];
+            }
+            current.extend_from_slice(rest);
         }
-        if !current.is_empty() {
+        if i == 0 {
             chunks.push(std::mem::take(&mut current));
         }
-        let mut rest: &[&str] = &sentence;
-        while !fits(&[], rest, limits) {
-            let cut = cut_point(rest, limits)?;
-            chunks.push(rest[..cut].to_vec());
-            rest = &rest[cut..];
-        }
-        current.extend_from_slice(rest);
     }
     if !current.is_empty() {
         chunks.push(current);
@@ -98,7 +109,7 @@ fn sentences(normalized: &str) -> Vec<Vec<&str>> {
         let mut current = Vec::new();
         for word in line.split(' ').filter(|w| !w.is_empty()) {
             current.push(word);
-            if ends_with_any(word, SENTENCE_END) {
+            if ends_with_any(word, SENTENCE_END) && !(out.is_empty() && is_weak_end(word)) {
                 out.push(std::mem::take(&mut current));
             }
         }
@@ -114,6 +125,17 @@ fn ends_with_any(word: &str, set: &[char]) -> bool {
         .chars()
         .next_back()
         .is_some_and(|c| set.contains(&c))
+}
+
+/// A word whose only sentence mark is a period after an initial or a known abbreviation.
+fn is_weak_end(word: &str) -> bool {
+    let Some(stem) = word.trim_end_matches(CLOSERS).strip_suffix('.') else {
+        return false;
+    };
+    let stem = stem.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let mut chars = stem.chars();
+    let initial = matches!((chars.next(), chars.next()), (Some(c), None) if c.is_alphabetic());
+    initial || ABBREVIATIONS.contains(&stem.to_lowercase().as_str())
 }
 
 fn chars_of(words: &[&str]) -> usize {
@@ -163,10 +185,71 @@ mod tests {
     }
 
     #[test]
-    fn packs_short_sentences_together() {
+    fn the_first_sentence_is_a_chunk_of_its_own() {
         let p = plan("Hi there. How are you? Fine!", TURBO2).unwrap();
-        assert_eq!(texts(&p), ["Hi there. How are you? Fine!"]);
-        assert_eq!(p.chunks[0].words, 6);
+        assert_eq!(texts(&p), ["Hi there.", "How are you? Fine!"]);
+        assert_eq!(p.chunks[0].words, 2);
+        let p = plan(
+            "Namaste! Abhi main busy hoon. Baad mein call karta hoon.",
+            TURBO2,
+        )
+        .unwrap();
+        assert_eq!(
+            texts(&p),
+            [
+                "Namaste!",
+                "Abhi main busy hoon. Baad mein call karta hoon."
+            ]
+        );
+        let p = plan("नमस्ते। मैं अभी व्यस्त हूँ।", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["नमस्ते।", "मैं अभी व्यस्त हूँ।"]);
+    }
+
+    #[test]
+    fn an_abbreviation_or_initial_does_not_end_the_first_sentence() {
+        let p = plan("Dr. Smith will call you back. See you.", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Dr. Smith will call you back.", "See you."]);
+        let p = plan("J. K. Rowling wrote it. Bye.", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["J. K. Rowling wrote it.", "Bye."]);
+        let p = plan("Hello, (Mrs.) Rao, e.g. this one! Bye.", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Hello, (Mrs.) Rao, e.g. this one!", "Bye."]);
+    }
+
+    #[test]
+    fn other_marks_and_plain_words_still_end_the_first_sentence() {
+        let p = plan("Namaste! Abhi main busy hoon.", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Namaste!", "Abhi main busy hoon."]);
+        let p = plan("Hi, thanks for calling. Please leave a message.", TURBO2).unwrap();
+        assert_eq!(
+            texts(&p),
+            ["Hi, thanks for calling.", "Please leave a message."]
+        );
+        let p = plan("Dr. Rao? Yes. Bye.", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Dr. Rao?", "Yes. Bye."]);
+        let p = plan("Thanks, bye. Dr. Smith called.", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Thanks, bye.", "Dr. Smith called."]);
+    }
+
+    #[test]
+    fn a_single_sentence_is_one_chunk() {
+        let p = plan("Hi there", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Hi there"]);
+    }
+
+    #[test]
+    fn a_long_first_sentence_is_cut_and_its_remainder_does_not_pack_with_the_next() {
+        let limits = PlanLimits {
+            max_words: 4,
+            max_chars: 200,
+        };
+        let p = plan("aa bb cc dd ee ff. gg. hh.", limits).unwrap();
+        assert_eq!(texts(&p), ["aa bb cc dd", "ee ff.", "gg. hh."]);
+    }
+
+    #[test]
+    fn later_short_sentences_are_packed_together() {
+        let p = plan("Hi. One two. Three four. Five!", TURBO2).unwrap();
+        assert_eq!(texts(&p), ["Hi.", "One two. Three four. Five!"]);
     }
 
     #[test]
@@ -215,8 +298,8 @@ mod tests {
             max_words: 4,
             max_chars: 200,
         };
-        let p = plan("a b c d e f. g.", limits).unwrap();
-        assert_eq!(texts(&p), ["a b c d", "e f. g."]);
+        let p = plan("xx. aa bb cc dd ee ff. gg.", limits).unwrap();
+        assert_eq!(texts(&p), ["xx.", "aa bb cc dd", "ee ff. gg."]);
     }
 
     #[test]

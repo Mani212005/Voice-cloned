@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use vc_backend::{CrispCliBackend, CrispOptions, RecipeManifest, RuntimePin};
+use vc_backend::{
+    Backend, CrispCliBackend, CrispOptions, CrispWarmBackend, RecipeManifest, RuntimePin,
+    WarmOptions,
+};
 use vc_core::SystemClock;
 use vc_engine::{Engine, EngineConfig, EngineContext};
 use vc_store::{DataDir, Store};
@@ -117,20 +120,36 @@ fn serve(cfg: Config) -> anyhow::Result<()> {
     let manifest = RecipeManifest::turbo2();
     let pin = RuntimePin::crispasr();
     let models_dir = std::path::absolute(&cfg.engine.models_dir)?;
-    let backend = CrispCliBackend::new(
-        manifest,
-        &pin,
-        CrispOptions {
-            runtime_bin: pin.binary_path(&models_dir),
-            model_dir: models_dir.join("files"),
-            threads: cfg.engine.threads,
-            nice: cfg.engine.nice,
-            extra_env: vec![],
-        },
-    );
-
     let data = DataDir::open(&cfg.storage.data_dir)
         .with_context(|| format!("data dir {}", cfg.storage.data_dir.display()))?;
+    let backend: Arc<dyn Backend> = if cfg.engine.warm {
+        Arc::new(CrispWarmBackend::new(
+            manifest,
+            &pin,
+            WarmOptions {
+                runtime_bin: pin.binary_path(&models_dir),
+                model_dir: models_dir.join("files"),
+                engine_dir: std::path::absolute(data.engine_dir())?,
+                threads: cfg.engine.threads,
+                nice: cfg.engine.nice,
+                start_timeout: Duration::from_secs(cfg.engine.start_timeout_s),
+                extra_env: vec![],
+            },
+        ))
+    } else {
+        Arc::new(CrispCliBackend::new(
+            manifest,
+            &pin,
+            CrispOptions {
+                runtime_bin: pin.binary_path(&models_dir),
+                model_dir: models_dir.join("files"),
+                threads: cfg.engine.threads,
+                nice: cfg.engine.nice,
+                extra_env: vec![],
+            },
+        ))
+    };
+
     let store = Arc::new(Store::open(&data.db_path())?);
     let head = store
         .verify_consent_chain()
@@ -139,7 +158,7 @@ fn serve(cfg: Config) -> anyhow::Result<()> {
     let ctx = EngineContext {
         store,
         data,
-        backend: Arc::new(backend),
+        backend,
         clock: Arc::new(SystemClock),
         config: EngineConfig {
             queue_capacity: cfg.engine.queue_capacity,
@@ -179,6 +198,7 @@ fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::info!(
             listen = %cfg.server.listen,
             backend = "turbo2",
+            warm = cfg.engine.warm,
             runtime = %pin.version,
             consent_chain_head = %head,
             "vcd serving"

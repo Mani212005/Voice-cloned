@@ -3,6 +3,7 @@
 //! explicit release instead of sleeping.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use vc_core::Language;
 
 use crate::{
     Backend, BackendError, BackendInfo, BoxFuture, Capabilities, ChunkOutput, ChunkRequest,
-    ChunkStats, ExitInfo,
+    ChunkStats, ExitInfo, VoiceRef,
 };
 
 pub const FAKE_SAMPLE_RATE: u32 = 24_000;
@@ -42,6 +43,34 @@ pub struct FakeBackend {
     state: Mutex<State>,
     started: Option<mpsc::UnboundedSender<ChunkRequest>>,
     gate: Option<Arc<Semaphore>>,
+    warm: Option<(mpsc::UnboundedSender<WarmEvent>, Arc<Semaphore>)>,
+}
+
+/// What a [`FakeBackend`] with a warm gate reports about `prepare` and `release`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WarmEvent {
+    /// `prepare` started and now waits for [`WarmControl::release_prepare`] or cancel.
+    PrepareStarted(VoiceRef),
+    PrepareEnded(VoiceRef, Result<(), BackendError>),
+    Released(Option<PathBuf>),
+}
+
+/// Test-side handle of a [`FakeBackend`] with a warm gate.
+#[derive(Debug)]
+pub struct WarmControl {
+    events: mpsc::UnboundedReceiver<WarmEvent>,
+    gate: Arc<Semaphore>,
+}
+
+impl WarmControl {
+    pub async fn next(&mut self) -> Option<WarmEvent> {
+        self.events.recv().await
+    }
+
+    /// Let `n` started warm-ups finish.
+    pub fn release_prepare(&self, n: usize) {
+        self.gate.add_permits(n);
+    }
 }
 
 /// Test-side handle of a gated [`FakeBackend`].
@@ -82,6 +111,7 @@ impl FakeBackend {
                 sample_rate_hz: FAKE_SAMPLE_RATE,
                 channels: 1,
                 max_chunk_words,
+                max_chunk_words_per_language: Default::default(),
                 max_chunk_chars,
                 concurrency: 1,
                 ram_budget_kib: 1_100_000,
@@ -101,7 +131,25 @@ impl FakeBackend {
             state: Mutex::default(),
             started: None,
             gate: None,
+            warm: None,
         }
+    }
+
+    /// `prepare` reports on a channel and waits for [`WarmControl::release_prepare`] (or
+    /// cancellation); `release` reports too. Without this both return at once.
+    pub fn warm_gated(mut self) -> (Self, WarmControl) {
+        let (tx, events) = mpsc::unbounded_channel();
+        let gate = Arc::new(Semaphore::new(0));
+        self.warm = Some((tx, gate.clone()));
+        (self, WarmControl { events, gate })
+    }
+
+    /// A lower word cap for `language`.
+    pub fn with_language_cap(mut self, language: Language, max_chunk_words: usize) -> Self {
+        self.capabilities
+            .max_chunk_words_per_language
+            .insert(language, max_chunk_words);
+        self
     }
 
     /// Every chunk waits for [`FakeControl::release`] (or cancellation) before finishing.
@@ -178,6 +226,30 @@ impl FakeBackend {
     }
 }
 
+impl FakeBackend {
+    async fn run_prepare(
+        &self,
+        voice: &VoiceRef,
+        cancel: &CancellationToken,
+    ) -> Result<(), BackendError> {
+        let Some((tx, gate)) = &self.warm else {
+            return Ok(());
+        };
+        let _ = tx.send(WarmEvent::PrepareStarted(voice.clone()));
+        let result = tokio::select! {
+            permit = gate.acquire() => {
+                if let Ok(p) = permit {
+                    p.forget();
+                }
+                Ok(())
+            }
+            () = cancel.cancelled() => Err(BackendError::Cancelled),
+        };
+        let _ = tx.send(WarmEvent::PrepareEnded(voice.clone(), result.clone()));
+        result
+    }
+}
+
 impl Backend for FakeBackend {
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
@@ -193,6 +265,21 @@ impl Backend for FakeBackend {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<ChunkOutput, BackendError>> {
         Box::pin(self.run(req, cancel))
+    }
+
+    fn prepare<'a>(
+        &'a self,
+        voice: &'a VoiceRef,
+        cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<(), BackendError>> {
+        Box::pin(self.run_prepare(voice, cancel))
+    }
+
+    fn release<'a>(&'a self, reference: Option<&'a Path>) -> BoxFuture<'a, ()> {
+        if let Some((tx, _)) = &self.warm {
+            let _ = tx.send(WarmEvent::Released(reference.map(Path::to_owned)));
+        }
+        Box::pin(async {})
     }
 }
 

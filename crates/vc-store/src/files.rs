@@ -6,6 +6,9 @@
 //!   voices/<voice_id>/ref.wav      normalized mono reference (0600)
 //!   jobs/<job_id>/                 engine work dir and outputs (0700)
 //!     chunk-0000.wav ...  out.wav  engine logs, consent.jsonl
+//!   engine/                        the warm engine's private dir (0700), wiped whenever
+//!                                  it starts or stops: HOME, caches, a link to the
+//!                                  voice it serves, its log and consent.jsonl
 //! ```
 //!
 //! Encryption at rest is a follow-up; until then the directory permissions are the
@@ -49,6 +52,11 @@ impl DataDir {
 
     pub fn reference_path(&self, id: VoiceId) -> PathBuf {
         self.voice_dir(id).join("ref.wav")
+    }
+
+    /// Owned by the warm engine backend, which creates and wipes it.
+    pub fn engine_dir(&self) -> PathBuf {
+        self.root.join("engine")
     }
 
     pub fn job_dir(&self, id: JobId) -> PathBuf {

@@ -2,9 +2,14 @@
 //!
 //! One task owns the queue and the slot; API handlers talk to it over a command channel
 //! and never touch the engine. "Two engines running at once" is unrepresentable: the
-//! slot is a single `Option` in that task. A running job is cancelled by killing its
-//! engine process. At startup, jobs left running by a previous process are queued
-//! again (output is deterministic, so a re-run is safe).
+//! slot is a single `Option` in that task, and a warm backend serializes its warm-ups
+//! with its chunks. A running job is cancelled by killing its engine process. At
+//! startup, jobs left running by a previous process are queued again (output is
+//! deterministic, so a re-run is safe).
+//!
+//! While no job runs, the scheduler asks the backend to get ready for the voice most
+//! likely to be used next (the newest voice at startup, a newly enrolled one, or the
+//! voice of the job that just ended), so the next job's first chunk starts warm.
 
 mod runner;
 mod scheduler;

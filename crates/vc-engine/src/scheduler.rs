@@ -3,7 +3,8 @@ use std::collections::VecDeque;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use vc_core::{JobId, JobState};
+use vc_backend::{BackendError, VoiceRef};
+use vc_core::{JobId, JobState, VoiceId};
 use vc_store::{JobEnd, NewJob, StoreError};
 
 use crate::runner::{RunResult, run_job};
@@ -57,6 +58,16 @@ enum Command {
         job: JobId,
         result: RunResult,
     },
+    Prepare {
+        voice: VoiceId,
+    },
+    Prepared {
+        id: u64,
+    },
+    ReleaseVoice {
+        voice: VoiceId,
+        reply: oneshot::Sender<()>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -70,6 +81,13 @@ struct Running {
     cancel_waiters: Vec<oneshot::Sender<CancelOutcome>>,
 }
 
+/// A warm-up of the backend for a voice, run while no job is running.
+struct Warming {
+    id: u64,
+    voice: VoiceId,
+    cancel: CancellationToken,
+}
+
 struct Scheduler {
     ctx: EngineContext,
     tx: mpsc::Sender<Command>,
@@ -77,6 +95,11 @@ struct Scheduler {
     queue: VecDeque<JobId>,
     /// The one engine slot.
     running: Option<Running>,
+    /// At most one warm-up, and only while `running` is empty: a job that starts for
+    /// another voice cancels it. A job for the same voice waits for it inside the backend
+    /// and then starts warm.
+    warming: Option<Warming>,
+    warm_seq: u64,
     shutting_down: Option<oneshot::Sender<()>>,
 }
 
@@ -95,6 +118,9 @@ impl std::fmt::Debug for Command {
             Command::Cancel { .. } => "Cancel",
             Command::Status { .. } => "Status",
             Command::Finished { .. } => "Finished",
+            Command::Prepare { .. } => "Prepare",
+            Command::Prepared { .. } => "Prepared",
+            Command::ReleaseVoice { .. } => "ReleaseVoice",
             Command::Shutdown { .. } => "Shutdown",
         })
     }
@@ -112,6 +138,8 @@ impl Engine {
             events: events.clone(),
             queue,
             running: None,
+            warming: None,
+            warm_seq: 0,
             shutting_down: None,
         };
         tokio::spawn(scheduler.run(rx));
@@ -141,6 +169,27 @@ impl Engine {
             return CancelOutcome::NotActive;
         }
         rx.await.unwrap_or(CancelOutcome::NotActive)
+    }
+
+    /// Warm the backend for `voice` while no job is running, so the next job with it
+    /// starts without loading the engine or encoding the voice. A no-op for backends
+    /// without warm state, and ignored while a job runs (every job end warms its own
+    /// voice when the queue is empty).
+    pub async fn prepare(&self, voice: VoiceId) {
+        let _ = self.send(Command::Prepare { voice }).await;
+    }
+
+    /// Drop everything the backend holds for `voice` (its warm engine). Call once the
+    /// voice is deleted; returns when that engine has been stopped.
+    pub async fn release_voice(&self, voice: VoiceId) {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .send(Command::ReleaseVoice { voice, reply })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
     }
 
     pub async fn status(&self, job: JobId) -> QueueStatus {
@@ -182,6 +231,17 @@ fn recover(ctx: &EngineContext) -> Result<VecDeque<JobId>, StoreError> {
 impl Scheduler {
     async fn run(mut self, mut rx: mpsc::Receiver<Command>) {
         self.start_next();
+        if self.running.is_none() {
+            // Warm the newest voice (voice ids sort by creation time).
+            match self.ctx.store.list_voices() {
+                Ok(voices) => {
+                    if let Some(v) = voices.last() {
+                        self.prepare(v.id);
+                    }
+                }
+                Err(e) => tracing::warn!("cannot list voices to warm the engine: {e}"),
+            }
+        }
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 Command::Enqueue { job, reply } => {
@@ -195,11 +255,26 @@ impl Scheduler {
                 Command::Finished { job, result } => {
                     self.finished(job, result).await;
                     if let Some(done) = self.shutting_down.take() {
+                        self.stop_backend().await;
                         let _ = done.send(());
                         return;
                     }
                     self.start_next();
+                    if self.running.is_none() {
+                        // Idle again: get the engine ready for this voice's next job
+                        // (restarting it now if it is near the RAM budget).
+                        if let Ok(j) = self.ctx.store.get_job(job) {
+                            self.prepare(j.voice_id);
+                        }
+                    }
                 }
+                Command::Prepare { voice } => self.prepare(voice),
+                Command::Prepared { id } => {
+                    if self.warming.as_ref().is_some_and(|w| w.id == id) {
+                        self.warming = None;
+                    }
+                }
+                Command::ReleaseVoice { voice, reply } => self.release_voice(voice, reply),
                 Command::Shutdown { reply } => {
                     self.queue.clear();
                     match &self.running {
@@ -208,6 +283,7 @@ impl Scheduler {
                             self.shutting_down = Some(reply);
                         }
                         None => {
+                            self.stop_backend().await;
                             let _ = reply.send(());
                             return;
                         }
@@ -288,6 +364,14 @@ impl Scheduler {
                 tracing::error!(job_id = %job, "cannot start job: {e}");
                 continue;
             }
+            let voice = self.ctx.store.get_job(job).map(|j| j.voice_id).ok();
+            if self
+                .warming
+                .as_ref()
+                .is_some_and(|w| Some(w.voice) != voice)
+            {
+                self.cancel_warming();
+            }
             let _ = self.events.send(JobEvent::Started { job });
             let cancel = CancellationToken::new();
             let handle = {
@@ -342,6 +426,72 @@ impl Scheduler {
                 CancelOutcome::NotActive
             });
         }
+    }
+
+    fn prepare(&mut self, voice: VoiceId) {
+        if self.running.is_some() || self.shutting_down.is_some() {
+            return;
+        }
+        if self.warming.as_ref().is_some_and(|w| w.voice == voice) {
+            return;
+        }
+        self.cancel_warming();
+        let row = match self.ctx.store.get_voice(voice) {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::debug!(voice_id = %voice, "not warming the engine: {e}");
+                return;
+            }
+        };
+        let voice_ref = VoiceRef {
+            reference: self.ctx.data.reference_path(voice),
+            reference_language: row.reference_language,
+        };
+        self.warm_seq += 1;
+        let id = self.warm_seq;
+        let cancel = CancellationToken::new();
+        {
+            let (backend, cancel, tx) = (self.ctx.backend.clone(), cancel.clone(), self.tx.clone());
+            tokio::spawn(async move {
+                match backend.prepare(&voice_ref, &cancel).await {
+                    Ok(()) => tracing::debug!(voice_id = %voice, "engine ready for voice"),
+                    Err(BackendError::Cancelled) => {
+                        tracing::debug!(voice_id = %voice, "engine warm-up cancelled");
+                    }
+                    Err(e) => tracing::warn!(voice_id = %voice, "engine warm-up failed: {e}"),
+                }
+                let _ = tx.send(Command::Prepared { id }).await;
+            });
+        }
+        self.warming = Some(Warming { id, voice, cancel });
+    }
+
+    /// Cancel the warm-up, if any. Its task ends on its own; the backend serializes it
+    /// with whatever runs next.
+    fn cancel_warming(&mut self) {
+        if let Some(w) = self.warming.take() {
+            w.cancel.cancel();
+        }
+    }
+
+    fn release_voice(&mut self, voice: VoiceId, reply: oneshot::Sender<()>) {
+        if self.warming.as_ref().is_some_and(|w| w.voice == voice) {
+            self.cancel_warming();
+        }
+        let backend = self.ctx.backend.clone();
+        let reference = self.ctx.data.reference_path(voice);
+        tokio::spawn(async move {
+            backend.release(Some(&reference)).await;
+            let _ = reply.send(());
+        });
+    }
+
+    /// End any warm-up and stop whatever the backend keeps running. The warm-up task is
+    /// not awaited here (it reports back on this task's own channel); the backend's
+    /// release waits for it instead.
+    async fn stop_backend(&mut self) {
+        self.cancel_warming();
+        self.ctx.backend.release(None).await;
     }
 
     fn persist_end(&self, job: JobId, end: &JobEnd) -> bool {

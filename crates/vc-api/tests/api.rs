@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use vc_api::{ApiConfig, AppState, router};
 use vc_audio::MonoPcm;
-use vc_backend::{Backend, FakeBackend, FakeControl};
+use vc_backend::{Backend, BackendError, FakeBackend, FakeControl, VoiceRef, WarmEvent};
 use vc_core::{JobId, JobState, ManualClock};
 use vc_engine::{Engine, EngineConfig, EngineContext, JobEvent};
 use vc_store::{DataDir, Store};
@@ -449,6 +449,66 @@ async fn enroll_list_get_and_delete_a_voice() {
         api.delete(&format!("/v1/voices/{id}")).await.status,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn an_enrolled_voice_is_warmed_and_a_deleted_one_released() {
+    let (b, mut warm) = FakeBackend::new().warm_gated();
+    let api = Api::new(Arc::new(b), EngineConfig::default(), ApiConfig::default());
+    let id = api.voice().await;
+    let reference = api.data.reference_path(id.parse().unwrap());
+    let voice = VoiceRef {
+        reference: reference.clone(),
+        reference_language: vc_core::Language::En,
+    };
+    assert_eq!(
+        warm.next().await,
+        Some(WarmEvent::PrepareStarted(voice.clone()))
+    );
+    let r = api.delete(&format!("/v1/voices/{id}")).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    let mut two = vec![warm.next().await.unwrap(), warm.next().await.unwrap()];
+    two.sort_by_key(|e| format!("{e:?}"));
+    assert_eq!(
+        two,
+        [
+            WarmEvent::PrepareEnded(voice, Err(BackendError::Cancelled)),
+            WarmEvent::Released(Some(reference.clone())),
+        ]
+    );
+    assert!(!reference.exists());
+}
+
+#[tokio::test]
+async fn the_chunk_cap_follows_the_job_language_and_runs_end_to_end() {
+    let backend = FakeBackend::with_limits(4, 200).with_language_cap(vc_core::Language::Hi, 2);
+    let api = Api::new(
+        Arc::new(backend),
+        EngineConfig::default(),
+        ApiConfig::default(),
+    );
+    let voice = api.voice().await;
+    let mut events = api.engine.subscribe();
+    // The first sentence is a chunk of its own; the rest is cut at the language's cap.
+    let text = "Namaste ji. abhi main busy hoon.";
+    let en = api.job(&voice, "en", text).await;
+    assert_eq!(en.json()["chunks_total"], 2);
+    let hi = api.job(&voice, "hi", text).await;
+    assert_eq!(hi.json()["chunks_total"], 3);
+    let job = hi.json()["id"].as_str().unwrap().to_owned();
+    api.wait_finished(&mut events, &job).await;
+    let j = api.get(&format!("/v1/jobs/{job}")).await.json();
+    assert_eq!(
+        j["state"], "succeeded",
+        "the runner plans with the same cap"
+    );
+    let words: Vec<u64> = j["chunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["words"].as_u64().unwrap())
+        .collect();
+    assert_eq!(words, [2, 2, 2]);
 }
 
 #[tokio::test]
