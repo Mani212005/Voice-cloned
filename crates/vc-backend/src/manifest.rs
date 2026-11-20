@@ -162,8 +162,7 @@ impl RecipeManifest {
     /// than on Linux. Every other platform keeps the base limits unchanged.
     #[must_use]
     pub fn for_host(mut self) -> Self {
-        #[cfg(target_os = "macos")]
-        if let Some(b) = self.budget.macos {
+        if let Some(b) = self.budget.macos.filter(|_| cfg!(target_os = "macos")) {
             self.budget.ram_budget_kib = b.ram_budget_kib;
             self.budget.restart_headroom_kib = b.restart_headroom_kib;
         }
