@@ -70,7 +70,7 @@ pub(crate) fn backend_info(
             name: pin.name.clone(),
             version: pin.version.clone(),
             commit: pin.commit.clone(),
-            tarball_sha256: pin.linux_x86_64.sha256.clone(),
+            tarball_sha256: pin.host_artifact().sha256.clone(),
         }),
         models: manifest
             .files

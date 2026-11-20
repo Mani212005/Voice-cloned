@@ -1,6 +1,7 @@
 # Pinned CrispASR runtime. vcd runs this exact release binary as a child process per
 # text chunk; it is never linked into vcd. `cargo xtask fetch-models` downloads the
-# tarball, checks size and sha256, and unpacks it under models/runtime/.
+# tarball for the host platform, checks size and sha256, and unpacks it under
+# models/runtime/.
 name = "crispasr"
 version = "0.8.53"
 commit = "1694d8ef516799b290c6da5fe80803b4af2771b0"
@@ -18,3 +19,14 @@ binary = "crispasr"
 # The unpacked binary, re-checked by `vcd serve` and `vcd models verify` on every start.
 binary_bytes = 31914656
 binary_sha256 = "949c869f0c0b1b733930dd46bd906528a98eb0fd9d4fd20d253a6eb34eb5b1ce"
+
+# Apple Silicon macOS (arm64). Same release, same checks. The tarball ships its own dylibs
+# next to the binary.
+[macos-arm64]
+url = "https://github.com/CrispStrobe/CrispASR/releases/download/v0.8.53/crispasr-macos-arm64.tar.gz"
+bytes = 18671735
+sha256 = "741aa7f3dd4cd996248f590421987df0712fc964a5e129d6a69960828e119e8b"
+dir = "crispasr-macos-arm64"
+binary = "crispasr"
+binary_bytes = 28337848
+binary_sha256 = "446eee4fd94ac36ec794061c4c4d15ceccc2ab00cbcfef9094404f376e498933"

@@ -1,0 +1,245 @@
+#!/bin/bash
+# Start, stop and check the local voice service (vcd) on a Mac, from a lasting home.
+#
+#   voice-clone-service start    start in the background (first run sets everything up)
+#   voice-clone-service stop     stop it, and the speech engine with it
+#   voice-clone-service status   is it running and answering its health check?
+#   voice-clone-service install  (re)build vcd and (re)fetch the models into the home
+#   voice-clone-service reset    stop and remove the binary, models, logs and scratch
+#                                (never the data: voices, jobs and the database)
+#
+# The home is ~/.local/share/voice-clone (override with VOICE_CLONE_HOME):
+#   bin/       vcd and a copy of this script, so later runs need no checkout
+#   models/    model files and the pinned engine runtime, hash-verified
+#   data/      vcd data directory: voices/, vcd.sqlite3, jobs/ (owner-only)
+#   logs/      vcd.log
+#   run/       vcd.pid
+#
+# The service listens on 127.0.0.1:8740 only. Nothing here installs a login item or any
+# other auto-start.
+
+set -euo pipefail
+
+HOME_DIR="${VOICE_CLONE_HOME:-$HOME/.local/share/voice-clone}"
+LISTEN="127.0.0.1:8740"
+HEALTH_URL="http://$LISTEN/v1/health"
+HEALTH_TIMEOUT_S=180
+STOP_TIMEOUT_S=30
+# Refuse to build or download below this much free space (in KiB).
+MIN_FREE_KIB=$((3 * 1024 * 1024))
+
+BIN_DIR="$HOME_DIR/bin"
+MODELS_DIR="$HOME_DIR/models"
+DATA_DIR="$HOME_DIR/data"
+LOG_DIR="$HOME_DIR/logs"
+RUN_DIR="$HOME_DIR/run"
+VCD="$BIN_DIR/vcd"
+LOG="$LOG_DIR/vcd.log"
+PID_FILE="$RUN_DIR/vcd.pid"
+SELF="$BIN_DIR/voice-clone-service"
+SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+
+die() {
+  echo "voice-clone-service: $*" >&2
+  exit 1
+}
+
+# The checkout this script lives in, or empty when it runs from the installed copy.
+repo_root() {
+  local root
+  root="$(cd "$(dirname "$SCRIPT")/.." && pwd -P)"
+  if [ -f "$root/Cargo.toml" ] && [ -d "$root/crates/vcd" ]; then
+    echo "$root"
+  fi
+}
+
+require_apple_silicon() {
+  [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] ||
+    die "this command is for Apple Silicon Macs (found $(uname -s) $(uname -m))"
+}
+
+free_kib() {
+  mkdir -p "$HOME_DIR"
+  df -k "$HOME_DIR" | awk 'NR == 2 { print $4 }'
+}
+
+# The pid in the pid file, if it is alive and really is our vcd (pids get reused).
+running_pid() {
+  local pid cmd
+  [ -f "$PID_FILE" ] || return 1
+  pid="$(cat "$PID_FILE")"
+  case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+  case "$cmd" in
+    "$VCD serve"*) echo "$pid" ;;
+    *) return 1 ;;
+  esac
+}
+
+healthy() {
+  curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1
+}
+
+installed() {
+  [ -x "$VCD" ] && "$VCD" models verify --models-dir "$MODELS_DIR" >/dev/null 2>&1
+}
+
+cmd_install() {
+  require_apple_silicon
+  local root
+  root="$(repo_root)"
+  [ -n "$root" ] || die "install must run from a checkout of the repository (scripts/voice-clone-service install)"
+  export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin"
+  command -v cargo >/dev/null || die "cargo not found; install Rust first (https://rustup.rs)"
+
+  if [ "$(free_kib)" -lt "$MIN_FREE_KIB" ]; then
+    die "less than $((MIN_FREE_KIB / 1024 / 1024)) GB free on the volume of $HOME_DIR"
+  fi
+  mkdir -p "$BIN_DIR" "$MODELS_DIR" "$LOG_DIR" "$RUN_DIR"
+
+  # Build into a scratch directory and delete it afterwards: a release build of the
+  # dependencies takes about a gigabyte. VOICE_CLONE_KEEP_BUILD=1 keeps it.
+  local target="$HOME_DIR/build"
+  echo "building vcd (release) from $root"
+  (cd "$root" && CARGO_TARGET_DIR="$target" cargo build --release --locked -p vcd -p xtask)
+  install -m 0755 "$target/release/vcd" "$VCD"
+  echo "fetching and verifying the models and the engine runtime"
+  "$target/release/xtask" fetch-models --models-dir "$MODELS_DIR"
+  if [ "${VOICE_CLONE_KEEP_BUILD:-0}" != "1" ]; then
+    rm -rf "$target"
+  fi
+
+  if [ "$SCRIPT" != "$SELF" ]; then
+    install -m 0755 "$SCRIPT" "$SELF"
+  fi
+  "$VCD" models verify --models-dir "$MODELS_DIR"
+  echo "installed in $HOME_DIR"
+}
+
+cmd_start() {
+  require_apple_silicon
+  local pid
+  if pid="$(running_pid)"; then
+    if healthy; then
+      echo "already running (pid $pid) at http://$LISTEN"
+      echo "logs: $LOG"
+      return 0
+    fi
+    die "pid $pid is running but not answering $HEALTH_URL; run 'stop' and look at $LOG"
+  fi
+  if healthy; then
+    die "something else already answers on $LISTEN"
+  fi
+
+  if ! installed; then
+    cmd_install
+  fi
+  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+  chmod 700 "$DATA_DIR"
+  # Keep one previous log, so a long-lived install does not grow without bound.
+  if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt $((10 * 1024 * 1024)) ]; then
+    mv "$LOG" "$LOG.1"
+  fi
+
+  # A new session (setsid) detaches vcd from this terminal and its process group, so
+  # closing the terminal or cleaning up the shell that ran this does not stop it.
+  # The engine runs only on this machine; the child gets no extra environment.
+  perl -MPOSIX -e 'POSIX::setsid() != -1 or die "setsid: $!"; exec @ARGV or die "exec: $!"' -- \
+    "$VCD" serve --listen "$LISTEN" --data-dir "$DATA_DIR" --models-dir "$MODELS_DIR" \
+    </dev/null >>"$LOG" 2>&1 &
+  pid=$!
+  echo "$pid" >"$PID_FILE"
+
+  local waited=0
+  while ! healthy; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      echo "vcd exited during start-up; last log lines:" >&2
+      tail -n 15 "$LOG" >&2 || true
+      exit 1
+    fi
+    if [ "$waited" -ge "$HEALTH_TIMEOUT_S" ]; then
+      echo "vcd did not answer $HEALTH_URL within ${HEALTH_TIMEOUT_S}s; last log lines:" >&2
+      tail -n 15 "$LOG" >&2 || true
+      exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "voice service is up (pid $pid) at http://$LISTEN after ${waited}s"
+  echo "logs: $LOG"
+  echo "stop: $SELF stop"
+}
+
+# Engines that outlived a vcd that was killed outright (macOS has no parent-death signal).
+kill_stray_engines() {
+  local pids
+  pids="$(pgrep -f "$MODELS_DIR/runtime/" || true)"
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+  fi
+}
+
+cmd_stop() {
+  local pid waited=0
+  if ! pid="$(running_pid)"; then
+    rm -f "$PID_FILE"
+    kill_stray_engines
+    echo "not running"
+    return 0
+  fi
+  # SIGTERM lets vcd finish in-flight HTTP requests and stop its engine.
+  kill -TERM "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$STOP_TIMEOUT_S" ]; then
+      echo "vcd ignored SIGTERM for ${STOP_TIMEOUT_S}s; killing it" >&2
+      kill -KILL "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  rm -f "$PID_FILE"
+  kill_stray_engines
+  echo "stopped"
+}
+
+cmd_status() {
+  local pid
+  if ! pid="$(running_pid)"; then
+    echo "stopped"
+    echo "start: $SELF start"
+    return 3
+  fi
+  echo "running (pid $pid, up $(ps -o etime= -p "$pid" | tr -d ' '))"
+  echo "address: http://$LISTEN"
+  echo "logs:    $LOG"
+  echo "data:    $DATA_DIR"
+  if healthy; then
+    echo "health:  $(curl -fsS --max-time 2 "$HEALTH_URL")"
+  else
+    echo "health:  not answering $HEALTH_URL" >&2
+    return 4
+  fi
+}
+
+cmd_reset() {
+  cmd_stop
+  # The data directory (voices, jobs, database) is never touched here.
+  rm -rf "$MODELS_DIR" "$HOME_DIR/build" "$LOG_DIR" "$RUN_DIR" "$VCD"
+  echo "removed the binary, models and logs under $HOME_DIR; kept $DATA_DIR"
+  echo "the next 'start' from a checkout sets everything up again"
+}
+
+case "${1:-}" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  status) cmd_status ;;
+  install) cmd_install ;;
+  reset) cmd_reset ;;
+  *)
+    sed -n '2,10p' "$SCRIPT" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+    ;;
+esac

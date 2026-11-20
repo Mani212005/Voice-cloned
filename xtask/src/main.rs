@@ -76,7 +76,7 @@ fn fetch(manifest: &RecipeManifest, pin: &RuntimePin, root: &Path) -> anyhow::Re
         download(&f.url, &dest, f.bytes, &f.sha256)?;
     }
 
-    let artifact = &pin.linux_x86_64;
+    let artifact = pin.host_artifact();
     match pin.verify_binary(root) {
         Ok(()) => println!("ok       {} {}", pin.name, pin.version),
         Err(_) => {
@@ -180,5 +180,7 @@ fn free_bytes(dir: &Path) -> anyhow::Result<u64> {
         dir.display(),
         std::io::Error::last_os_error()
     );
-    Ok(st.f_bavail.saturating_mul(st.f_frsize))
+    // The statvfs field widths differ by platform (u32 blocks on macOS, u64 on Linux).
+    #[allow(clippy::useless_conversion)]
+    Ok(u64::from(st.f_bavail).saturating_mul(u64::from(st.f_frsize)))
 }

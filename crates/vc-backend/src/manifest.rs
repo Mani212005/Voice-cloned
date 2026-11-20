@@ -64,6 +64,18 @@ pub struct Budget {
     /// A warm engine is restarted before a chunk when its peak RSS so far plus this
     /// would cross `ram_budget_kib`.
     pub restart_headroom_kib: u64,
+    /// Replaces `ram_budget_kib` and `restart_headroom_kib` on macOS, where the engine's
+    /// memory is accounted differently (see `RecipeManifest::for_host`).
+    #[serde(default)]
+    pub macos: Option<HostBudget>,
+}
+
+/// The memory limits of [`Budget`] that differ on a host platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostBudget {
+    pub ram_budget_kib: u64,
+    pub restart_headroom_kib: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
@@ -83,6 +95,8 @@ pub struct RuntimePin {
     pub source: String,
     #[serde(rename = "linux-x86_64")]
     pub linux_x86_64: RuntimeArtifact,
+    #[serde(rename = "macos-arm64")]
+    pub macos_arm64: RuntimeArtifact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -136,7 +150,23 @@ impl RecipeManifest {
     pub fn turbo2() -> Self {
         // The embedded manifest is checked by a unit test, so this cannot fail at runtime.
         #[allow(clippy::expect_used)]
-        Self::parse(TURBO2_MANIFEST).expect("embedded turbo2 manifest is valid")
+        Self::parse(TURBO2_MANIFEST)
+            .expect("embedded turbo2 manifest is valid")
+            .for_host()
+    }
+
+    /// The manifest with the memory limits of the platform this binary runs on.
+    ///
+    /// Only macOS differs: there the engine's footprint is measured by the kernel (not
+    /// `VmHWM`) and the Metal path holds extra F16 buffers, so the same chunks peak higher
+    /// than on Linux. Every other platform keeps the base limits unchanged.
+    #[must_use]
+    pub fn for_host(mut self) -> Self {
+        if let Some(b) = self.budget.macos.filter(|_| cfg!(target_os = "macos")) {
+            self.budget.ram_budget_kib = b.ram_budget_kib;
+            self.budget.restart_headroom_kib = b.restart_headroom_kib;
+        }
+        self
     }
 
     fn validate(&self) -> Result<(), ManifestError> {
@@ -176,8 +206,16 @@ impl RecipeManifest {
         {
             return invalid("per-language word caps must be positive and at most max_chunk_words");
         }
-        if self.budget.restart_headroom_kib >= self.budget.ram_budget_kib {
-            return invalid("restart_headroom_kib must be below ram_budget_kib");
+        let host_limits =
+            std::iter::once((self.budget.ram_budget_kib, self.budget.restart_headroom_kib)).chain(
+                self.budget
+                    .macos
+                    .map(|b| (b.ram_budget_kib, b.restart_headroom_kib)),
+            );
+        for (budget, headroom) in host_limits {
+            if headroom >= budget {
+                return invalid("restart_headroom_kib must be below ram_budget_kib");
+            }
         }
         if self.engine.threads == 0 || self.engine.tts_steps == 0 {
             return invalid("threads and tts_steps must be positive");
@@ -218,15 +256,24 @@ impl RuntimePin {
             .join(format!("{}-{}", self.name, self.version))
     }
 
+    /// The release artifact for the platform this binary runs on: Apple Silicon on macOS,
+    /// Linux x86_64 everywhere else.
+    pub fn host_artifact(&self) -> &RuntimeArtifact {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            &self.macos_arm64
+        } else {
+            &self.linux_x86_64
+        }
+    }
+
     pub fn binary_path(&self, models_root: &Path) -> PathBuf {
-        self.install_dir(models_root)
-            .join(&self.linux_x86_64.dir)
-            .join(&self.linux_x86_64.binary)
+        let a = self.host_artifact();
+        self.install_dir(models_root).join(&a.dir).join(&a.binary)
     }
 
     /// Check the unpacked binary under `models_root` for size and sha256.
     pub fn verify_binary(&self, models_root: &Path) -> Result<(), VerifyError> {
-        let a = &self.linux_x86_64;
+        let a = self.host_artifact();
         verify_file(
             &self.binary_path(models_root),
             a.binary_bytes,
@@ -282,7 +329,8 @@ mod tests {
 
     #[test]
     fn embedded_turbo2_manifest_matches_the_chosen_recipe() {
-        let m = RecipeManifest::turbo2();
+        // The base manifest: `turbo2()` may apply this platform's memory limits on top.
+        let m = RecipeManifest::parse(TURBO2_MANIFEST).unwrap();
         assert_eq!(m.id, "turbo2");
         assert_eq!(m.runtime, "third_party/crispasr/PIN.toml");
         assert_eq!(m.file("t3").unwrap().name, "chatterbox-v3-t3-q4_k.gguf");
@@ -303,6 +351,7 @@ mod tests {
         );
         assert_eq!(m.budget.ram_budget_kib, 1_100_000);
         assert_eq!(m.budget.restart_headroom_kib, 100_000);
+        assert!(m.budget.macos.is_some());
         assert_eq!(m.engine.env.get("MALLOC_ARENA_MAX").unwrap(), "1");
         assert_eq!(m.engine.languages, [Language::En, Language::Hi]);
         for f in &m.files {
@@ -322,9 +371,34 @@ mod tests {
         );
         assert!(p.linux_x86_64.url.contains("/v0.8.53/"));
         assert_eq!(
-            p.binary_path(Path::new("models")),
-            Path::new("models/runtime/crispasr-0.8.53/crispasr-linux-x86_64/crispasr")
+            p.macos_arm64.sha256,
+            "741aa7f3dd4cd996248f590421987df0712fc964a5e129d6a69960828e119e8b"
         );
+        assert!(p.macos_arm64.url.contains("/v0.8.53/"));
+        let host = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "crispasr-macos-arm64"
+        } else {
+            "crispasr-linux-x86_64"
+        };
+        assert_eq!(
+            p.binary_path(Path::new("models")),
+            Path::new("models/runtime/crispasr-0.8.53")
+                .join(host)
+                .join("crispasr")
+        );
+    }
+
+    #[test]
+    fn host_limits_apply_only_on_macos() {
+        let base = RecipeManifest::parse(TURBO2_MANIFEST).unwrap();
+        let host = base.clone().for_host();
+        let mac = base.budget.macos.unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(host.budget.ram_budget_kib, mac.ram_budget_kib);
+            assert_eq!(host.budget.restart_headroom_kib, mac.restart_headroom_kib);
+        } else {
+            assert_eq!(host, base);
+        }
     }
 
     #[test]

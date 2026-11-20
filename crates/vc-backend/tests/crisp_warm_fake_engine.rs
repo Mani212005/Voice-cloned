@@ -124,9 +124,18 @@ fn mkfifo(path: &Path) {
 }
 
 /// The process is gone (reaped), or the pid belongs to something else now.
+#[cfg(target_os = "linux")]
 fn gone(pid: i32) -> bool {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
     !String::from_utf8_lossy(&cmdline).contains("fake-engine")
+}
+
+/// No `/proc` outside Linux: the engine is reaped by its backend, so a signal-0 probe
+/// finds no process once it is gone.
+#[cfg(not(target_os = "linux"))]
+fn gone(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) != 0 }
 }
 
 #[tokio::test]

@@ -249,6 +249,13 @@ async fn cancel_kills_and_reaps_a_running_engine() {
     assert_eq!(task.await.unwrap(), Err(BackendError::Cancelled));
     // Reaped by wait4: the pid no longer exists, not even as a zombie (or it already
     // belongs to an unrelated new process).
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    assert!(!String::from_utf8_lossy(&cmdline).contains("fake-engine"));
+    #[cfg(target_os = "linux")]
+    {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        assert!(!String::from_utf8_lossy(&cmdline).contains("fake-engine"));
+    }
+    // No `/proc` elsewhere: a signal-0 probe finds no process once it is reaped.
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: signal 0 only checks that the process exists.
+    assert!(unsafe { libc::kill(pid, 0) } != 0);
 }

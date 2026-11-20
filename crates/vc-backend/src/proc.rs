@@ -179,7 +179,10 @@ pub fn spawn(cmd: &EngineCommand) -> Result<EngineChild, ProcError> {
     // system calls.
     unsafe {
         command.pre_exec(move || {
-            // Die with vcd, so an engine never outlives its supervisor.
+            // Die with vcd, so an engine never outlives its supervisor. macOS has no
+            // such call: there a vcd that is killed outright leaves its engine running,
+            // and only a normal stop (SIGTERM or Ctrl-C) cleans it up.
+            #[cfg(target_os = "linux")]
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -244,6 +247,7 @@ pub async fn run(
 }
 
 /// `VmHWM` of a live process, in KiB.
+#[cfg(target_os = "linux")]
 pub fn peak_rss_kib(pid: libc::pid_t) -> std::io::Result<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
     status
@@ -252,6 +256,29 @@ pub fn peak_rss_kib(pid: libc::pid_t) -> std::io::Result<u64> {
         .and_then(|v| v.trim().strip_suffix("kB"))
         .and_then(|v| v.trim().parse().ok())
         .ok_or_else(|| std::io::Error::other("no VmHWM in /proc status"))
+}
+
+/// Lifetime peak physical footprint of a live process, in KiB: the macOS counterpart of
+/// `VmHWM` (the current footprint when the kernel reports no peak).
+#[cfg(target_os = "macos")]
+pub fn peak_rss_kib(pid: libc::pid_t) -> std::io::Result<u64> {
+    // SAFETY: rusage_info_v4 is plain old data; zeroed is a valid value.
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: the pointer is valid for a rusage_info_v4, the flavor `RUSAGE_INFO_V4` names.
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            pid,
+            libc::RUSAGE_INFO_V4,
+            (&raw mut info).cast::<libc::rusage_info_t>(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let bytes = info
+        .ri_lifetime_max_phys_footprint
+        .max(info.ri_phys_footprint);
+    Ok(bytes / 1024)
 }
 
 fn wait4(pid: libc::pid_t) -> std::io::Result<(ExitInfo, u64)> {
@@ -286,7 +313,14 @@ fn wait4_flags(pid: libc::pid_t, flags: libc::c_int) -> std::io::Result<Option<(
     } else {
         ExitInfo::Signal(libc::WTERMSIG(status))
     };
-    Ok(Some((exit, u64::try_from(usage.ru_maxrss).unwrap_or(0))))
+    // `ru_maxrss` is in KiB on Linux and in bytes on macOS.
+    let max_rss = u64::try_from(usage.ru_maxrss).unwrap_or(0);
+    let max_rss_kib = if cfg!(target_os = "macos") {
+        max_rss / 1024
+    } else {
+        max_rss
+    };
+    Ok(Some((exit, max_rss_kib)))
 }
 
 #[cfg(test)]
@@ -345,7 +379,11 @@ mod tests {
                 .parse::<i32>()
                 .unwrap()
         };
-        let script = "cut -d' ' -f19 /proc/self/stat";
+        let script = if cfg!(target_os = "linux") {
+            "cut -d' ' -f19 /proc/self/stat"
+        } else {
+            "/bin/ps -o nice= -p $$"
+        };
         let base = read_nice(sh(script, dir.path())).await;
         let mut niced = sh(script, dir.path());
         niced.nice = 10;
@@ -399,6 +437,7 @@ mod tests {
 
     /// Block until `pid` terminates. False if the pidfd cannot be opened for a reason
     /// other than the process being gone already.
+    #[cfg(target_os = "linux")]
     fn wait_for_exit(pid: libc::pid_t) -> bool {
         // SAFETY: plain syscalls on our own fd.
         unsafe {
@@ -415,6 +454,19 @@ mod tests {
             libc::close(fd);
             rc == 1
         }
+    }
+
+    /// Wait up to 10 s for `pid` to terminate (no pidfd outside Linux, so this polls).
+    #[cfg(not(target_os = "linux"))]
+    fn wait_for_exit(pid: libc::pid_t) -> bool {
+        for _ in 0..200 {
+            // SAFETY: signal 0 only checks that the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
 
     #[tokio::test]

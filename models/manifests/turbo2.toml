@@ -66,6 +66,13 @@ max_chunk_words_per_language = { hi = 14 }
 # engine's earlier peak, plus a few MB; the worst measured was 1.068 GB.
 restart_headroom_kib = 100000
 
+# Apple Silicon macOS, used instead of the two limits above (the kernel's footprint
+# counter and Metal's F16 buffers put the same chunks higher than on Linux). Measured
+# peaks per chunk are in models/recipes/turbo2/README.md. Linux ignores this table.
+[budget.macos]
+ram_budget_kib = 1500000
+restart_headroom_kib = 150000
+
 [reference]
 min_s = 5.0
 max_s = 30.0
