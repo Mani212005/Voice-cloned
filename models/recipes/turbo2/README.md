@@ -43,13 +43,13 @@ cargo xtask verify         # re-check later; `vcd serve` also re-checks on every
 | `-l` | `en`, or `hi` for Hindi and Hinglish | |
 | `-sl` | the reference's language, when it differs from `-l` | Cross-lingual cloning (an English reference speaking Hindi) runs T3 without guidance: better likeness and half the T3 cost. |
 | Chunk | the first sentence alone; then 19 words or fewer (14 for `hi`), cut at sentence ends, then clause marks, then between words | Time to first audio grows with the first chunk. Peak RSS grows with a chunk's audio length, and these caps keep it to about 8 s. |
-| Process | one warm `--server` process, restarted before a chunk once its peak RSS is above 1.0 GB | Saves the model load and the reference encode (about 6 s idle, 15 s or more under load) on every chunk. Output is bit-identical to the CLI. |
+| Process | one warm `--server` process, restarted before a chunk once its peak RSS is above 1.0 GB (1.35 GB on macOS) | Saves the model load and the reference encode (about 6 s idle, 15 s or more under load) on every chunk. Output is bit-identical to the CLI. |
 | `--no-punctuation` | server only | Otherwise the server downloads an unpinned punctuation model that TTS does not use. |
 | `MALLOC_ARENA_MAX=1`, `MALLOC_TRIM_THRESHOLD_=0`, `MALLOC_MMAP_THRESHOLD_=65536` | engine environment | With glibc's defaults a warm engine's RSS crept about 22 MB per request and never came back (1.41 GB after 15 chunks). With these it levels off at the largest chunk served. |
 
 ## Budget
 
-1.1 GB of peak RSS per engine process, in the unit the measurements used (`ru_maxrss` in
+On Linux, 1.1 GB of peak RSS per engine process (macOS has its own limit, below), in the unit the measurements used (`ru_maxrss` in
 KiB divided by 1e6, so `ram_budget_kib = 1100000`). `vcd` reads every chunk's peak (from
 `wait4`, or the warm engine's `VmHWM`) and fails the job with `memory_budget_exceeded` if
 a chunk goes over.

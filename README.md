@@ -52,8 +52,8 @@ The speech engine is the pinned CrispASR v0.8.53 release with the `turbo2` recip
 process warm (its `--server` mode: models loaded, the voice already encoded) and feeds it
 one text chunk at a time: the first sentence alone, then chunks of 19 words or fewer (14
 for Hindi). While idle it gets the engine ready for the voice used next, and it restarts
-the engine before any chunk that could take its peak RSS over the 1.1 GB budget; a chunk
-that still goes over fails its job. `engine.warm = false` in `vcd.toml` runs a cold CLI
+the engine before any chunk that could take its peak RSS over the memory budget (1.1 GB on
+Linux, 1.5 GB on macOS); a chunk that still goes over fails its job. `engine.warm = false` in `vcd.toml` runs a cold CLI
 process per chunk instead; the audio is identical. The chunk plan differs from v1's, so
 a job accepted by the v1 binary and still queued or running at upgrade fails with
 "chunk plan changed since the job was accepted" and must be resubmitted; restart the
