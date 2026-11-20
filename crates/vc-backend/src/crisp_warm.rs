@@ -802,8 +802,16 @@ mod tests {
     #[test]
     fn policy_comes_from_the_manifest_budget() {
         let p = backend().policy();
-        assert_eq!(p.budget_kib, 1_100_000);
-        assert_eq!(p.restart_above_kib(), 1_000_000);
+        let budget = RecipeManifest::turbo2().budget;
+        assert_eq!(p.budget_kib, budget.ram_budget_kib);
+        assert_eq!(
+            p.restart_above_kib(),
+            budget.ram_budget_kib - budget.restart_headroom_kib
+        );
+        if cfg!(not(target_os = "macos")) {
+            assert_eq!(p.budget_kib, 1_100_000);
+            assert_eq!(p.restart_above_kib(), 1_000_000);
+        }
     }
 
     #[test]

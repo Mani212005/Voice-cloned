@@ -16,7 +16,12 @@ Both files are used exactly as published; nothing is spliced or converted.
 |---|---|---|---|---|---|
 | T3 (text to speech tokens) | `chatterbox-v3-t3-q4_k.gguf` | 386,367,392 | `fb63d7c53c4f8bb07286d67709c4d4200fa63b4de3476a4558f37964ce8e5aa6` | huggingface `cstr/chatterbox-GGUF` @ `c45504bb` | MIT |
 | S3Gen (speech tokens to audio) | `chatterbox-turbo-s3gen-q4_k.gguf` | 255,891,744 | `1c16251e6722c46500ebddd92be495e0dba160c31169f4b64d833acba819b060` | huggingface `cstr/chatterbox-turbo-GGUF` @ `b544cf8b` | MIT |
-| Runtime | `crispasr-linux-x86_64.tar.gz` v0.8.53 (commit `1694d8ef`) | 44,169,635 | `3396d49473642d1097b667270b54125279bdca740b735e15c3c96c1b32f787c0` | github `CrispStrobe/CrispASR` release | MIT |
+| Runtime, Linux x86_64 | `crispasr-linux-x86_64.tar.gz` v0.8.53 (commit `1694d8ef`) | 44,169,635 | `3396d49473642d1097b667270b54125279bdca740b735e15c3c96c1b32f787c0` | github `CrispStrobe/CrispASR` release | MIT |
+| Runtime, macOS arm64 | `crispasr-macos-arm64.tar.gz` v0.8.53 (commit `1694d8ef`) | 18,671,735 | `741aa7f3dd4cd996248f590421987df0712fc964a5e129d6a69960828e119e8b` | github `CrispStrobe/CrispASR` release | MIT |
+
+`vcd` and `cargo xtask` pick the runtime of the platform they run on (Apple Silicon on
+macOS, Linux x86_64 otherwise) and check the unpacked binary against its own pinned size
+and sha256.
 
 ## Build
 
@@ -56,6 +61,21 @@ at most about the cold peak of that chunk or its own earlier peak, whichever is 
 plus a few MB: after the one-word warm-up it holds 0.917 GB, and pushed past its restart
 line with long Hindi chunks it reached 1.068 GB. `restart_headroom_kib = 100000` restarts
 it before any chunk once its peak is above 1.0 GB.
+
+### macOS (Apple Silicon)
+
+The same recipe runs on the macOS arm64 release, with a larger limit: `[budget.macos]` in
+the manifest replaces the two numbers above (`ram_budget_kib = 1500000`,
+`restart_headroom_kib = 150000`) and Linux ignores it. The engine's memory is counted
+differently there: `vcd` reads the kernel's lifetime peak physical footprint (the
+counterpart of `VmHWM`) and `wait4`'s `ru_maxrss` (bytes, not KiB), and the Metal path
+holds extra F16 buffers. The glibc `MALLOC_*` settings do nothing on macOS. Measured on an
+M-series MacBook (warm engine, English, seed 0): a 3.6 s chunk 1.203 GB, a 2.8 s chunk
+1.215 GB, a 6.4 s chunk (19 words) 1.223 GB. With the Linux budget of 1.1 GB every chunk
+would fail, so the budget is 1.5 GB there and a warm engine restarts once its peak is above
+1.35 GB. macOS has no parent-death signal, so an engine outlives a `vcd` that is killed
+outright (`kill -9`); a normal stop (SIGTERM, Ctrl-C) stops it, and so does
+`scripts/voice-clone-service stop`.
 
 ## Not covered yet
 

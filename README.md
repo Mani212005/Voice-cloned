@@ -109,3 +109,37 @@ per-chunk downloads, `/v1/speech` streaming, C2PA signing of the joined output, 
 a systemd unit with an engine sandbox, API keys, a baked voice pack that survives engine
 restarts, Opus output, an OpenAI-compatible shim, and an option for the spoken AI
 disclaimer (always off in v1).
+
+### Running it on a Mac
+
+On Apple Silicon `vcd` runs the pinned CrispASR macOS arm64 release (same version, its own
+size and sha256 pin). One command starts the service in the background, from a lasting home
+outside the checkout, `~/.local/share/voice-clone` (override with `VOICE_CLONE_HOME`):
+
+```sh
+scripts/voice-clone-service start    # first run: builds vcd, fetches and verifies the models
+```
+
+The first run needs Rust (`cargo`) and about 1 GB of free disk for the build, which it
+deletes afterwards, plus 0.7 GB for the models and engine. It then installs `vcd` and a copy
+of the script into the home, so later runs need no checkout and only start the service:
+
+```sh
+~/.local/share/voice-clone/bin/voice-clone-service start    # background, 127.0.0.1:8740 only; waits for /v1/health
+~/.local/share/voice-clone/bin/voice-clone-service status   # pid, uptime, health; exit code 3 when stopped
+~/.local/share/voice-clone/bin/voice-clone-service stop     # stops vcd and its engine
+~/.local/share/voice-clone/bin/voice-clone-service reset    # stop, then remove binary, models and logs
+tail -f ~/.local/share/voice-clone/logs/vcd.log             # logs (JSON lines)
+```
+
+What lives where: `bin/` (vcd and the script), `models/` (hash-verified model files and
+engine), `data/` (voices, jobs, `vcd.sqlite3`; owner-only), `logs/`, `run/` (pid file).
+`reset` never touches `data/`; to start from nothing, run `reset` and then delete the
+`data/` folder yourself (that removes enrolled voices). To move existing voices over, stop
+the service and copy `voices/` and `vcd.sqlite3` into `data/`. After pulling a new version,
+run `scripts/voice-clone-service install` once to rebuild.
+
+Nothing starts it automatically: no launchd agent or login item is installed, so after a
+reboot or logout run `start` again. The service is local only; nothing leaves the machine.
+The engine's memory limit is higher on macOS than on Linux; see
+[`models/recipes/turbo2/README.md`](models/recipes/turbo2/README.md#macos-apple-silicon).
