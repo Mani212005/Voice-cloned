@@ -4,7 +4,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 use time::macros::format_description;
 use vc_backend::BackendInfo;
-use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, VoiceId};
+use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, Rate, VoiceId};
 use vc_store::{ChunkRow, JobRow, VoiceRow};
 
 pub fn rfc3339(ms: i64) -> String {
@@ -68,6 +68,8 @@ pub struct JobView<'a> {
     pub voice_id: VoiceId,
     pub state: JobState,
     pub language: Language,
+    /// Speaking rate the audio is delivered at (1.0 is the engine's own pace).
+    pub rate: Rate,
     /// 1-based position in the queue while queued.
     pub queue_position: Option<usize>,
     pub chunks_total: usize,
@@ -99,6 +101,7 @@ impl<'a> JobView<'a> {
             voice_id: job.voice_id,
             state: job.state,
             language: job.language,
+            rate: job.rate,
             queue_position,
             chunks_total: job.chunks_total,
             chunks_done: job.chunks_done,

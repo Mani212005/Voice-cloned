@@ -11,7 +11,7 @@ use vc_backend::fake::{FAKE_SAMPLES_PER_WORD, fake_pcm};
 use vc_backend::{
     Backend, BackendError, FakeBackend, FakeControl, FakeOutcome, VoiceRef, WarmControl, WarmEvent,
 };
-use vc_core::{Clock, ErrorCode, JobId, JobState, Language, ManualClock, VoiceId};
+use vc_core::{Clock, ErrorCode, JobId, JobState, Language, ManualClock, Rate, VoiceId};
 use vc_engine::{
     CancelOutcome, Engine, EngineConfig, EngineContext, EnqueueError, JobEvent, QueueStatus,
     sweep_expired,
@@ -100,8 +100,9 @@ impl Fx {
     }
 
     fn new_job(&self, text: &str, language: Language, max_words: usize) -> NewJob {
-        let plan = vc_text::plan(
+        let plan = vc_text::plan_speech(
             text,
+            language,
             vc_text::PlanLimits {
                 max_words,
                 max_chars: 200,
@@ -115,6 +116,7 @@ impl Fx {
             text: text.into(),
             text_sha256: "11".repeat(32),
             chunks_total: plan.chunks.len(),
+            rate: Rate::NATIVE,
         }
     }
 }
@@ -213,6 +215,64 @@ async fn success_writes_chunks_and_a_gapped_output_and_forgets_the_text() {
         hex::encode(sha2::Sha256::digest(&bytes))
     );
     assert_eq!(fx.store.chunks(job.id).unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn a_faster_rate_shortens_chunks_and_gaps_without_new_engine_text() {
+    let fx = Fx::new();
+    let backend = Arc::new(FakeBackend::with_limits(2, 200));
+    let config = EngineConfig {
+        inter_chunk_gap_ms: 120,
+        ..EngineConfig::default()
+    };
+    let engine = Engine::start(fx.ctx(backend.clone(), config)).unwrap();
+    let mut events = engine.subscribe();
+    let rate = Rate::from_f64(1.2).unwrap();
+    let job = NewJob {
+        rate,
+        ..fx.new_job("aap kaise hain? main theek hoon.", Language::Hi, 2)
+    };
+    engine.enqueue(job.clone()).await.unwrap();
+    assert_eq!(finished(&mut events, job.id).await, JobState::Succeeded);
+
+    let texts: Vec<String> = backend.calls().into_iter().map(|c| c.text).collect();
+    assert_eq!(texts, ["aap kaise", "hain?", "main theek", "hoon."]);
+    let stretched: Vec<MonoPcm> = texts
+        .iter()
+        .map(|t| vc_audio::time_stretch(&fake_pcm(t), 1.2).unwrap())
+        .collect();
+    for (i, want) in stretched.iter().enumerate() {
+        assert_eq!(
+            &vc_audio::read_wav_file(&fx.data.chunk_path(job.id, i)).unwrap(),
+            want
+        );
+    }
+    // 120 ms of gap at 1.2x is 100 ms.
+    let expected = vc_audio::concat_with_gap(&stretched, 100).unwrap();
+    let out = vc_audio::read_wav_file(&fx.data.output_path(job.id)).unwrap();
+    assert_eq!(out, expected);
+    let row = fx.store.get_job(job.id).unwrap();
+    assert_eq!(row.rate, rate);
+    assert_eq!(row.audio_ms, Some(expected.duration_ms()));
+}
+
+#[tokio::test]
+async fn english_text_reaches_the_engine_in_spoken_form() {
+    let fx = Fx::new();
+    let backend = Arc::new(FakeBackend::new());
+    let engine = Engine::start(fx.ctx(backend.clone(), EngineConfig::default())).unwrap();
+    let mut events = engine.subscribe();
+    let job = fx.new_job("Hi. It ran 467 CPU tasks in 40-80 ms.", Language::En, 19);
+    engine.enqueue(job.clone()).await.unwrap();
+    assert_eq!(finished(&mut events, job.id).await, JobState::Succeeded);
+    let texts: Vec<String> = backend.calls().into_iter().map(|c| c.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "Hi.",
+            "It ran four hundred sixty-seven see pee you tasks in forty to eighty milliseconds."
+        ]
+    );
 }
 
 #[tokio::test]

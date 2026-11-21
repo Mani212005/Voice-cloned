@@ -17,8 +17,8 @@
 //! key from `CRISPASR_API_KEYS` as a bearer token and the voice to exist in
 //! `--voice-dir`. Speech is `fake_pcm(input)` as a WAV. Steering:
 //!
-//! - `FAKE_ENGINE_RECORD`: append `START <pid>`, then `ARG`/`ENV` lines, at start-up and
-//!   `REQ <json body>` for every speech request
+//! - `FAKE_ENGINE_RECORD`: append `START <pid>`, then `ARG`/`ENV` lines, at start-up,
+//!   `LISTEN <pid>` once the port is bound, and `REQ <json body>` for every speech request
 //! - `FAKE_ENGINE_ALLOC_MB`: touch and keep this many more MiB on every speech request
 //!   (a warm engine whose peak RSS grows per chunk)
 //! - `FAKE_ENGINE_MODE`: `ok` (default), `exit-at-start:<code>`, `crash-on:<n>` (abort
@@ -220,6 +220,9 @@ fn serve(args: &[String]) -> Result<ExitCode, String> {
     let key = std::env::var("CRISPASR_API_KEYS").map_err(|_| "missing CRISPASR_API_KEYS")?;
     let listener =
         std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind: {e}"))?;
+    if let Some(path) = &record {
+        append(path, &format!("LISTEN {}\n", std::process::id()))?;
+    }
     eprintln!("fake-engine: serving on {port}");
 
     let mut kept: Vec<Vec<u8>> = Vec::new();

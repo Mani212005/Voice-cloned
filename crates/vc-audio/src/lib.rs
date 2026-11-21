@@ -141,6 +141,106 @@ pub fn concat_with_gap(chunks: &[MonoPcm], gap_ms: u32) -> Result<MonoPcm, Audio
     })
 }
 
+/// Speaking rates [`time_stretch`] accepts: 0.5x (half speed) to 2x.
+pub const RATE_RANGE: std::ops::RangeInclusive<f64> = 0.5..=2.0;
+
+/// Change the speaking rate of speech without changing its pitch (WSOLA: waveform
+/// similarity overlap-add). `rate` above 1 is faster and shorter: the output has
+/// `len / rate` samples. Rate 1 returns the input unchanged, sample for sample.
+///
+/// 25 ms Hann frames at 50 % overlap are taken from the input at `rate` times the output
+/// hop; each frame is shifted by up to 10 ms to the position that best continues the
+/// waveform already written, so pitch periods line up and no phasing or echo appears.
+pub fn time_stretch(pcm: &MonoPcm, rate: f64) -> Result<MonoPcm, AudioError> {
+    if !RATE_RANGE.contains(&rate) {
+        return Err(AudioError::Invalid(format!(
+            "rate {rate} is outside {}-{}",
+            RATE_RANGE.start(),
+            RATE_RANGE.end()
+        )));
+    }
+    if rate == 1.0 || pcm.samples.is_empty() {
+        return Ok(pcm.clone());
+    }
+    let sr = pcm.sample_rate as usize;
+    // Frame length (even) and synthesis hop.
+    let n = ((sr * 25 / 1000) / 2 * 2).max(16);
+    let hs = n / 2;
+    let tol = (sr / 100).max(1);
+    let x: Vec<f32> = pcm.samples.iter().map(|&s| f32::from(s)).collect();
+    let len = x.len();
+    let target = ((len as f64) / rate).round() as usize;
+    let at = |i: isize| -> f32 {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| x.get(i))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    // Periodic Hann: overlapping copies at hop n/2 sum to exactly 1.
+    let win: Vec<f32> = (0..n)
+        .map(|i| {
+            let ph = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
+            (0.5 - 0.5 * ph.cos()) as f32
+        })
+        .collect();
+    let frames = target / hs + 2;
+    let mut y = vec![0.0f32; frames * hs + n];
+    let mut wsum = vec![0.0f32; frames * hs + n];
+    let mut prev: isize = 0;
+    for k in 0..frames {
+        let nominal = (k as f64 * hs as f64 * rate).round() as isize;
+        let pos = if k == 0 {
+            0
+        } else {
+            // The natural continuation of the previous frame, which the chosen frame
+            // should resemble.
+            let natural = prev + hs as isize;
+            let mut best = nominal;
+            let mut best_score = f32::NEG_INFINITY;
+            for d in -(tol as isize)..=(tol as isize) {
+                let cand = nominal + d;
+                if cand < 0 {
+                    continue;
+                }
+                let mut dot = 0.0f32;
+                let mut energy = 1e-6f32;
+                // Every other sample is enough to rank candidates and halves the cost.
+                for i in (0..n).step_by(2) {
+                    let c = at(cand + i as isize);
+                    dot += c * at(natural + i as isize);
+                    energy += c * c;
+                }
+                let score = dot / energy.sqrt();
+                if score > best_score {
+                    best_score = score;
+                    best = cand;
+                }
+            }
+            best
+        };
+        let out0 = k * hs;
+        for i in 0..n {
+            y[out0 + i] += win[i] * at(pos + i as isize);
+            wsum[out0 + i] += win[i];
+        }
+        prev = pos;
+    }
+    let samples = y
+        .iter()
+        .zip(&wsum)
+        .take(target)
+        .map(|(&v, &w)| {
+            let v = if w > 1e-3 { v / w } else { v };
+            v.round().clamp(-32768.0, 32767.0) as i16
+        })
+        .collect();
+    Ok(MonoPcm {
+        sample_rate: pcm.sample_rate,
+        samples,
+    })
+}
+
 /// Limits for an enrollment reference.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReferenceLimits {
@@ -323,6 +423,76 @@ mod tests {
             samples: vec![1],
         };
         assert!(concat_with_gap(&[a, b], 0).is_err());
+    }
+
+    /// Frequency of the strongest autocorrelation peak between 80 and 1000 Hz.
+    fn pitch_hz(p: &MonoPcm) -> f64 {
+        let x: Vec<f64> = p.samples.iter().map(|&s| f64::from(s)).collect();
+        let sr = p.sample_rate as usize;
+        let mid = &x[x.len() / 4..x.len() * 3 / 4];
+        let (lo, hi) = (sr / 1000, sr / 80);
+        let lag = (lo..hi)
+            .max_by(|&a, &b| {
+                let ra: f64 = mid.windows(a + 1).map(|w| w[0] * w[a]).sum();
+                let rb: f64 = mid.windows(b + 1).map(|w| w[0] * w[b]).sum();
+                ra.total_cmp(&rb)
+            })
+            .unwrap();
+        sr as f64 / lag as f64
+    }
+
+    fn rms(p: &MonoPcm) -> f64 {
+        let n = p.samples.len() as f64;
+        (p.samples.iter().map(|&s| f64::from(s).powi(2)).sum::<f64>() / n).sqrt()
+    }
+
+    #[test]
+    fn rate_one_is_the_identity() {
+        let pcm = tone(24_000, 1.0, 0.4);
+        assert_eq!(time_stretch(&pcm, 1.0).unwrap(), pcm);
+    }
+
+    #[test]
+    fn stretch_changes_length_but_not_pitch_or_level() {
+        let pcm = tone(24_000, 2.0, 0.4);
+        for rate in [0.75, 1.2, 1.5] {
+            let out = time_stretch(&pcm, rate).unwrap();
+            let want = (pcm.samples.len() as f64 / rate).round() as usize;
+            assert_eq!(out.samples.len(), want, "rate {rate}");
+            assert!(
+                (pitch_hz(&out) - 220.0).abs() < 3.0,
+                "rate {rate}: {} Hz",
+                pitch_hz(&out)
+            );
+            let db = 20.0 * (rms(&out) / rms(&pcm)).log10();
+            assert!(db.abs() < 0.5, "rate {rate}: level changed by {db} dB");
+        }
+    }
+
+    #[test]
+    fn stretch_keeps_silence_silent_and_rejects_bad_rates() {
+        let silent = MonoPcm {
+            sample_rate: 24_000,
+            samples: vec![0; 24_000],
+        };
+        let out = time_stretch(&silent, 1.2).unwrap();
+        assert!(out.samples.iter().all(|&s| s == 0));
+        for bad in [0.0, 0.49, 2.01, f64::NAN, f64::INFINITY] {
+            assert!(time_stretch(&silent, bad).is_err(), "{bad}");
+        }
+        let empty = MonoPcm {
+            sample_rate: 24_000,
+            samples: vec![],
+        };
+        assert!(time_stretch(&empty, 1.2).unwrap().samples.is_empty());
+    }
+
+    #[test]
+    fn stretch_does_not_overflow_at_full_scale() {
+        let loud = tone(24_000, 0.5, 1.0);
+        let out = time_stretch(&loud, 1.3).unwrap();
+        let peak = out.samples.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(peak >= 32_000);
     }
 
     #[test]

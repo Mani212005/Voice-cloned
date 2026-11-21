@@ -6,9 +6,11 @@ pub mod error;
 pub mod ids;
 pub mod job;
 pub mod lang;
+pub mod rate;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use error::ErrorCode;
 pub use ids::{ConsentId, JobId, VoiceId};
 pub use job::JobState;
 pub use lang::Language;
+pub use rate::{InvalidRate, Rate};

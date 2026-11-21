@@ -86,7 +86,18 @@ impl Fixture {
     }
 
     /// Engine pids in start order.
+    /// Engines that came up (bound their port), in order. A spawn that lost its port to
+    /// a parallel test before binding exits and is retried on a new port, as designed;
+    /// counting it would make the restart assertions depend on scheduling.
     fn starts(&self) -> Vec<i32> {
+        self.lines("LISTEN ")
+            .iter()
+            .map(|l| l.parse().unwrap())
+            .collect()
+    }
+
+    /// Every engine process spawned, including ones that exited before listening.
+    fn launches(&self) -> Vec<i32> {
         self.lines("START ")
             .iter()
             .map(|l| l.parse().unwrap())
@@ -432,7 +443,8 @@ async fn an_engine_that_exits_during_start_up_is_a_spawn_error() {
         matches!(err, BackendError::Spawn(ref m) if m.contains("exit code 3")),
         "{err:?}"
     );
-    assert_eq!(f.starts().len(), 2, "one retry on a new port");
+    assert_eq!(f.launches().len(), 2, "one retry on a new port");
+    assert!(f.starts().is_empty());
 }
 
 async fn started_pid(started: PathBuf) -> i32 {

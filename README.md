@@ -53,12 +53,29 @@ process warm (its `--server` mode: models loaded, the voice already encoded) and
 one text chunk at a time: the first sentence alone, then chunks of 19 words or fewer (14
 for Hindi). While idle it gets the engine ready for the voice used next, and it restarts
 the engine before any chunk that could take its peak RSS over the memory budget (1.1 GB on
-Linux, 1.5 GB on macOS); a chunk that still goes over fails its job. `engine.warm = false` in `vcd.toml` runs a cold CLI
-process per chunk instead; the audio is identical. The chunk plan differs from v1's, so
-a job accepted by the v1 binary and still queued or running at upgrade fails with
-"chunk plan changed since the job was accepted" and must be resubmitted; restart the
-service when idle. See
+Linux, 1.5 GB on macOS); a chunk that still goes over fails its job. `engine.warm = false`
+in `vcd.toml` runs a cold CLI process per chunk instead; the audio is identical. See
 [`models/recipes/turbo2/README.md`](models/recipes/turbo2/README.md).
+
+English text is rewritten into its spoken form before it is chunked, because the engine
+reads text literally (and lowercased): acronyms are spelled with letter names ("AI" is
+said "ay eye", "CPUs" "see pee yous"), numbers, decimals, years, ranges ("40-80 ms" is
+"forty to eighty milliseconds"), money, percentages, times, ordinals, versions, units and
+common abbreviations are said as words. Callers send ordinary written text. Hindi and
+Hinglish text is passed through unchanged. To see what the engine will be given:
+`echo 'It ran 467 CPU tasks.' | cargo run -q -p vc-text --example speakable -- en`.
+
+A job's optional `rate` (0.75-1.5, default 1.0) speeds the narration up or slows it
+down without changing the pitch: each chunk is time-stretched after synthesis (WSOLA) and
+the pause between chunks scales with it. Rate 1.0 leaves the audio untouched.
+`cargo run -q -p vc-audio --example stretch -- 1.2 in.wav out.wav` applies the same
+stretch to a file.
+
+Upgrading: the database migrates itself (schema v2 adds the job rate; an older vcd
+refuses the newer database). The chunk plan of English text with numbers, acronyms, symbols or abbreviations
+differs from the previous release's, so such a job still queued or running at upgrade
+fails with "chunk plan changed since the job was accepted" and must be resubmitted;
+restart the service when idle.
 
 ```sh
 cargo xtask fetch-models          # model files + engine runtime into models/ (gitignored), verified
@@ -74,6 +91,8 @@ curl -s -X POST $B/v1/voices -F consent_id=cns_... -F name=me -F reference_langu
 # 2. A job (language "en", or "hi" for Hindi and Hinglish), then poll it and download the WAV.
 curl -s -X POST $B/v1/jobs -H 'content-type: application/json' \
   -d '{"voice_id":"voice_...","language":"hi","text":"Namaste, main abhi busy hoon."}'
+curl -s -X POST $B/v1/jobs -H 'content-type: application/json' \
+  -d '{"voice_id":"voice_...","language":"en","rate":1.2,"text":"It runs 467 CPU tasks in 40-80 ms."}'
 curl -s $B/v1/jobs/job_...                     # state, queue position, chunks, timings, peak RSS
 curl -s -o out.wav $B/v1/jobs/job_.../audio    # 24 kHz mono WAV once succeeded
 curl -s -X DELETE $B/v1/jobs/job_...           # cancel (kills the engine) or delete
@@ -98,8 +117,8 @@ in an owner-only data directory. The engine runs with a cleared environment and 
 private HOME, cache and TMPDIR per job. Nothing is sent off the machine. Never commit
 references, outputs or recordings; tests use synthetic audio only.
 
-Workspace: `crates/vc-core` (ids, job states, error codes), `vc-text` (chunk planner),
-`vc-audio` (WAV), `vc-backend` (`Backend` trait, `CrispWarmBackend` and its restart
+Workspace: `crates/vc-core` (ids, job states, error codes), `vc-text` (spoken form, chunk planner),
+`vc-audio` (WAV, time-stretch), `vc-backend` (`Backend` trait, `CrispWarmBackend` and its restart
 policy, `CrispCliBackend`, fakes, process control), `vc-store` (SQLite + data dir),
 `vc-engine` (scheduler: one engine slot, queue, cancel, recovery, retention), `vc-api`
 (axum routes), `vcd` (the binary), `xtask`.

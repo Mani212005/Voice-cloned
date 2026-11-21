@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use vc_core::{ErrorCode, JobId, JobState, Language, VoiceId};
+use vc_core::{ErrorCode, JobId, JobState, Language, Rate, VoiceId};
 use vc_engine::{CancelOutcome, EnqueueError, QueueStatus};
 use vc_store::{JobRow, NewJob, StoreError};
 use vc_text::{PlanError, PlanLimits};
@@ -21,6 +21,10 @@ pub struct CreateJob {
     /// `en`, or `hi` for Hindi and Hinglish.
     pub language: String,
     pub text: String,
+    /// Speaking rate, 0.75-1.5 (1.2 is 20 % faster). Default 1.0, the engine's own pace.
+    /// Applied as a pitch-preserving time-stretch of the synthesized audio.
+    #[serde(default)]
+    pub rate: Option<f64>,
 }
 
 async fn view(state: &AppState, job: &JobRow) -> Result<Value, Problem> {
@@ -59,6 +63,10 @@ pub async fn create(
             "the engine does not support this language",
         ));
     }
+    let rate = match req.rate {
+        None => Rate::NATIVE,
+        Some(r) => Rate::from_f64(r).map_err(|e| Problem::invalid(e.to_string()))?,
+    };
     let chars = req.text.chars().count();
     if chars > state.config.max_job_chars {
         return Err(Problem::new(
@@ -69,8 +77,9 @@ pub async fn create(
             ),
         ));
     }
-    let plan = vc_text::plan(
+    let plan = vc_text::plan_speech(
         &req.text,
+        language,
         PlanLimits {
             max_words: caps.max_chunk_words_for(language),
             max_chars: caps.max_chunk_chars,
@@ -89,6 +98,7 @@ pub async fn create(
         text_sha256: hex::encode(Sha256::digest(req.text.as_bytes())),
         text: req.text,
         chunks_total: plan.chunks.len(),
+        rate,
     };
     let id = job.id;
     match state.engine.enqueue(job).await {
