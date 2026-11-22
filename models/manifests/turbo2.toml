@@ -1,10 +1,10 @@
 # Recipe "turbo2": the v1 voice engine.
 #
-# Chatterbox V3 T3 (Q4_K, used as published) + Chatterbox Turbo S3Gen (Q4_K, published,
-# 2-step "meanflow" decoder), run by the pinned CrispASR CLI. Chosen over best1 (V3 T3 +
-# spliced s-v3voc S3Gen, 6 decoder steps) because it is 4-5x cheaper in CPU with equal
-# speaker similarity and intelligibility in English and Hindi, at 0.4-0.5 dB lower HNR.
-# No spliced file is needed. See models/recipes/turbo2/README.md.
+# Chatterbox V3 T3 (Q4_K, used as published) + Chatterbox Turbo S3Gen (Q4_K with its flow
+# decoder at Q8_0, spliced from two published files; 2-step "meanflow" decoder), run by the
+# pinned CrispASR CLI. Chosen over best1 (V3 T3 + spliced s-v3voc S3Gen, 6 decoder steps)
+# because it is 4-5x cheaper in CPU with equal speaker similarity and intelligibility in
+# English and Hindi. See models/recipes/turbo2/README.md.
 id = "turbo2"
 kind = "crispasr-cli"
 runtime = "third_party/crispasr/PIN.toml"
@@ -17,13 +17,33 @@ bytes = 386367392
 sha256 = "fb63d7c53c4f8bb07286d67709c4d4200fa63b4de3476a4558f37964ce8e5aa6"
 license = "MIT"
 
+# The published Q4_K Turbo S3Gen with its flow decoder (the s3.fd.* tensors, the part that
+# shapes the voice's texture) taken from the published Q8_0 file. Built by
+# `cargo xtask fetch-models` with a deterministic splice and pinned like a download: +33 MB
+# of weights, about +35 MB of peak RSS, and predicted naturalness (UTMOS) +0.15 to +0.26 on
+# the owner's voice. Every other tensor, including the vocoder and the speech tokenizer, is
+# byte for byte the published Q4_K file.
 [[files]]
 role = "s3gen"
+name = "chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf"
+bytes = 288823584
+sha256 = "ca43f0bba6ca1b3f3a40ab958d9900dbc709430ff3afb9f962ff990ec950d613"
+license = "MIT"
+
+[files.derive]
+tensor_prefix = "s3.fd."
+
+[files.derive.base]
 name = "chatterbox-turbo-s3gen-q4_k.gguf"
 url = "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/b544cf8b49504d880640864a757b3ff3e4421a42/chatterbox-turbo-s3gen-q4_k.gguf"
 bytes = 255891744
 sha256 = "1c16251e6722c46500ebddd92be495e0dba160c31169f4b64d833acba819b060"
-license = "MIT"
+
+[files.derive.donor]
+name = "chatterbox-turbo-s3gen-q8_0.gguf"
+url = "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/b544cf8b49504d880640864a757b3ff3e4421a42/chatterbox-turbo-s3gen-q8_0.gguf"
+bytes = 366820384
+sha256 = "a77e3ef2559e8c4411b06a2692eb35646a43b0e5eef899633271aa281122e750"
 
 [engine]
 backend = "chatterbox"

@@ -31,10 +31,36 @@ pub struct RecipeManifest {
 pub struct ModelFile {
     pub role: String,
     pub name: String,
-    pub url: String,
+    /// Where a published file is downloaded from. A derived file has `derive` instead.
+    #[serde(default)]
+    pub url: Option<String>,
     pub bytes: u64,
     pub sha256: String,
     pub license: String,
+    /// How a derived file is built from published ones (`cargo xtask fetch-models`).
+    #[serde(default)]
+    pub derive: Option<Derivation>,
+}
+
+/// A model file built locally: `base` with every tensor whose name starts with
+/// `tensor_prefix` taken from `donor` (its type and data). The splice is deterministic, so
+/// the result is pinned by the file's own size and sha256 like any other.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Derivation {
+    pub tensor_prefix: String,
+    pub base: SourceFile,
+    pub donor: SourceFile,
+}
+
+/// A published input of a derived file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFile {
+    pub name: String,
+    pub url: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -183,17 +209,37 @@ impl RecipeManifest {
                 return invalid("needs exactly one t3 and one s3gen file");
             }
         }
-        for f in &self.files {
-            let plain = !f.name.is_empty()
-                && f.name
+        let plain = |name: &str| {
+            !name.is_empty()
+                && name
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-                && !f.name.starts_with('.');
-            if !plain {
+                && !name.starts_with('.')
+        };
+        let hash = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit());
+        for f in &self.files {
+            if !plain(&f.name) {
                 return invalid("file names must be plain names");
             }
-            if f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if !hash(&f.sha256) {
                 return invalid("sha256 must be 64 hex digits");
+            }
+            match (&f.url, &f.derive) {
+                (Some(url), None) if url.starts_with("https://") => {}
+                (None, Some(d)) => {
+                    if d.tensor_prefix.is_empty() {
+                        return invalid("a derivation needs a tensor prefix");
+                    }
+                    for src in [&d.base, &d.donor] {
+                        if !plain(&src.name) || src.name == f.name {
+                            return invalid("derivation inputs must be plain names of other files");
+                        }
+                        if !hash(&src.sha256) || !src.url.starts_with("https://") {
+                            return invalid("derivation inputs need an https url and a sha256");
+                        }
+                    }
+                }
+                _ => return invalid("a file has either an https url or a derivation"),
             }
         }
         if self.engine.languages.is_empty() {
@@ -349,11 +395,27 @@ mod tests {
         assert_eq!(m.runtime, "third_party/crispasr/PIN.toml");
         assert_eq!(m.file("t3").unwrap().name, "chatterbox-v3-t3-q4_k.gguf");
         let s3 = m.file("s3gen").unwrap();
-        assert_eq!(s3.name, "chatterbox-turbo-s3gen-q4_k.gguf");
+        assert_eq!(s3.name, "chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf");
         assert_eq!(
             s3.sha256,
+            "ca43f0bba6ca1b3f3a40ab958d9900dbc709430ff3afb9f962ff990ec950d613"
+        );
+        assert_eq!(s3.url, None);
+        let d = s3.derive.as_ref().unwrap();
+        assert_eq!(d.tensor_prefix, "s3.fd.");
+        assert_eq!(d.base.name, "chatterbox-turbo-s3gen-q4_k.gguf");
+        assert_eq!(
+            d.base.sha256,
             "1c16251e6722c46500ebddd92be495e0dba160c31169f4b64d833acba819b060"
         );
+        assert_eq!(d.donor.name, "chatterbox-turbo-s3gen-q8_0.gguf");
+        for src in [&d.base, &d.donor] {
+            assert!(src.url.ends_with(&format!("/{}", src.name)));
+            assert!(
+                src.url
+                    .starts_with("https://huggingface.co/cstr/chatterbox-turbo-GGUF/")
+            );
+        }
         assert_eq!(m.engine.tts_steps, 2);
         assert_eq!(m.engine.threads, 6);
         assert_eq!(m.engine.seed, 0);
@@ -373,10 +435,11 @@ mod tests {
         assert!(m.budget.macos.is_some());
         assert_eq!(m.engine.env.get("MALLOC_ARENA_MAX").unwrap(), "1");
         assert_eq!(m.engine.languages, [Language::En, Language::Hi]);
-        for f in &m.files {
-            assert!(f.url.ends_with(&format!("/{}", f.name)));
-            assert!(f.url.starts_with("https://huggingface.co/cstr/"));
-        }
+        let t3 = m.file("t3").unwrap();
+        let url = t3.url.as_deref().unwrap();
+        assert!(url.ends_with(&format!("/{}", t3.name)));
+        assert!(url.starts_with("https://huggingface.co/cstr/"));
+        assert_eq!(t3.derive, None);
     }
 
     #[test]
@@ -435,6 +498,35 @@ mod tests {
         assert!(RecipeManifest::parse(&bad_hash).is_err());
         let unknown = format!("{good}\n[extra]\nx = 1\n");
         assert!(RecipeManifest::parse(&unknown).is_err());
+    }
+
+    #[test]
+    fn a_file_is_downloaded_or_derived_never_both_or_neither() {
+        let good = TURBO2_MANIFEST;
+        let both = good.replace(
+            "name = \"chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf\"\n",
+            "name = \"chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf\"\nurl = \"https://x/y\"\n",
+        );
+        assert_ne!(both, good);
+        assert!(RecipeManifest::parse(&both).is_err());
+        let neither = good.replace(
+            "url = \"https://huggingface.co/cstr/chatterbox-GGUF/resolve/c45504bb8d55473a2213db17ec472ed11b69056a/chatterbox-v3-t3-q4_k.gguf\"\n",
+            "",
+        );
+        assert_ne!(neither, good);
+        assert!(RecipeManifest::parse(&neither).is_err());
+        let plain_http = good.replace(
+            "url = \"https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/b544cf8b49504d880640864a757b3ff3e4421a42/chatterbox-turbo-s3gen-q8_0.gguf\"",
+            "url = \"http://example.com/chatterbox-turbo-s3gen-q8_0.gguf\"",
+        );
+        assert_ne!(plain_http, good);
+        assert!(RecipeManifest::parse(&plain_http).is_err());
+        let self_input = good.replace(
+            "name = \"chatterbox-turbo-s3gen-q8_0.gguf\"",
+            "name = \"chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf\"",
+        );
+        assert_ne!(self_input, good);
+        assert!(RecipeManifest::parse(&self_input).is_err());
     }
 
     #[test]

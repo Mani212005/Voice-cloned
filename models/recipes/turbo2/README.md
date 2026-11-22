@@ -1,7 +1,7 @@
 # Recipe `turbo2`
 
-The v1 voice engine: **Chatterbox V3 T3 (Q4_K) + Chatterbox Turbo S3Gen (Q4_K), 2 decoder
-steps**, run by the pinned CrispASR v0.8.53 release: one warm `--server` process reused
+The v1 voice engine: **Chatterbox V3 T3 (Q4_K) + Chatterbox Turbo S3Gen (Q4_K, flow
+decoder at Q8_0), 2 decoder steps**, run by the pinned CrispASR v0.8.53 release: one warm `--server` process reused
 across chunks and jobs (default), or one CLI process per chunk (`engine.warm = false`).
 
 The machine-readable recipe is [`models/manifests/turbo2.toml`](../../manifests/turbo2.toml)
@@ -10,12 +10,20 @@ Both are embedded into `vcd` at build time; nothing else defines the recipe.
 
 ## Inputs
 
-Both files are used exactly as published; nothing is spliced or converted.
+The T3 file is used exactly as published. The S3Gen file is derived from two published
+files: the Q4_K S3Gen with its flow decoder (every `s3.fd.*` tensor) taken from the Q8_0
+S3Gen. `cargo xtask fetch-models` downloads both inputs, checks their pins, splices them
+(`xtask/src/gguf.rs`: metadata copied byte for byte, tensor order kept, each tensor on the
+file's alignment boundary), checks the result against its own pin and removes the inputs.
+The splice is deterministic: the same inputs always give the same bytes, and splicing
+nothing reproduces the published Q4_K file exactly. `cargo xtask splice` runs it by hand.
 
 | Role | File | Bytes | sha256 | Source | Licence |
 |---|---|---|---|---|---|
 | T3 (text to speech tokens) | `chatterbox-v3-t3-q4_k.gguf` | 386,367,392 | `fb63d7c53c4f8bb07286d67709c4d4200fa63b4de3476a4558f37964ce8e5aa6` | huggingface `cstr/chatterbox-GGUF` @ `c45504bb` | MIT |
-| S3Gen (speech tokens to audio) | `chatterbox-turbo-s3gen-q4_k.gguf` | 255,891,744 | `1c16251e6722c46500ebddd92be495e0dba160c31169f4b64d833acba819b060` | huggingface `cstr/chatterbox-turbo-GGUF` @ `b544cf8b` | MIT |
+| S3Gen (speech tokens to audio), derived | `chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf` | 288,823,584 | `ca43f0bba6ca1b3f3a40ab958d9900dbc709430ff3afb9f962ff990ec950d613` | built from the two files below | MIT |
+| S3Gen input: base | `chatterbox-turbo-s3gen-q4_k.gguf` | 255,891,744 | `1c16251e6722c46500ebddd92be495e0dba160c31169f4b64d833acba819b060` | huggingface `cstr/chatterbox-turbo-GGUF` @ `b544cf8b` | MIT |
+| S3Gen input: flow decoder donor | `chatterbox-turbo-s3gen-q8_0.gguf` | 366,820,384 | `a77e3ef2559e8c4411b06a2692eb35646a43b0e5eef899633271aa281122e750` | huggingface `cstr/chatterbox-turbo-GGUF` @ `b544cf8b` | MIT |
 | Runtime, Linux x86_64 | `crispasr-linux-x86_64.tar.gz` v0.8.53 (commit `1694d8ef`) | 44,169,635 | `3396d49473642d1097b667270b54125279bdca740b735e15c3c96c1b32f787c0` | github `CrispStrobe/CrispASR` release | MIT |
 | Runtime, macOS arm64 | `crispasr-macos-arm64.tar.gz` v0.8.53 (commit `1694d8ef`) | 18,671,735 | `741aa7f3dd4cd996248f590421987df0712fc964a5e129d6a69960828e119e8b` | github `CrispStrobe/CrispASR` release | MIT |
 

@@ -315,7 +315,7 @@ mod tests {
                 "-m",
                 "/m/chatterbox-v3-t3-q4_k.gguf",
                 "--codec-model",
-                "/m/chatterbox-turbo-s3gen-q4_k.gguf",
+                "/m/chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf",
                 "-t",
                 "6",
                 "-l",

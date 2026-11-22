@@ -3,13 +3,18 @@
 //! - `fetch-models`: download the turbo2 model files and the pinned CrispASR release into
 //!   `models/` (gitignored), verifying size and sha256 of everything.
 //! - `verify`: re-check what is already there.
+//! - `splice`: build a GGUF file from two others (how a derived model file is made).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, bail, ensure};
 use clap::{Parser, Subcommand};
-use vc_backend::manifest::{RecipeManifest, RuntimePin, VerifyError, verify_file};
+use vc_backend::manifest::{
+    Derivation, ModelFile, RecipeManifest, RuntimePin, VerifyError, verify_file,
+};
+
+mod gguf;
 
 /// Refuse to download when less than this is free on the target filesystem.
 const MIN_FREE_BYTES: u64 = 5_000_000_000;
@@ -33,6 +38,13 @@ enum Cmd {
         #[arg(long, default_value = "models")]
         models_dir: PathBuf,
     },
+    /// Write BASE with every tensor whose name starts with PREFIX taken from DONOR.
+    Splice {
+        base: PathBuf,
+        donor: PathBuf,
+        out: PathBuf,
+        prefix: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -52,7 +64,68 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::Splice {
+            base,
+            donor,
+            out,
+            prefix,
+        } => {
+            let n = splice_files(&base, &donor, &out, &prefix)?;
+            println!("replaced {n} tensors; wrote {}", out.display());
+            Ok(())
+        }
     }
+}
+
+/// Build a derived model file: fetch its two published inputs (verified), splice them,
+/// check the result against the file's own pin, then remove the inputs, which vcd never
+/// loads.
+fn derive(files_dir: &Path, f: &ModelFile, d: &Derivation) -> anyhow::Result<()> {
+    ensure_free_space(files_dir, f.bytes + d.base.bytes + d.donor.bytes)?;
+    for src in [&d.base, &d.donor] {
+        let path = files_dir.join(&src.name);
+        if verify_file(&path, src.bytes, &src.sha256).is_ok() {
+            continue;
+        }
+        println!(
+            "download {} ({} MB, input of {})",
+            src.name,
+            src.bytes / 1_000_000,
+            f.name
+        );
+        download(&src.url, &path, src.bytes, &src.sha256)?;
+    }
+    println!(
+        "build    {} ({} with the {}* tensors of {})",
+        f.name, d.base.name, d.tensor_prefix, d.donor.name
+    );
+    let dest = files_dir.join(&f.name);
+    splice_files(
+        &files_dir.join(&d.base.name),
+        &files_dir.join(&d.donor.name),
+        &dest,
+        &d.tensor_prefix,
+    )?;
+    if let Err(e) = verify_file(&dest, f.bytes, &f.sha256) {
+        let _ = std::fs::remove_file(&dest);
+        bail!("derived file failed verification: {e}");
+    }
+    for src in [&d.base, &d.donor] {
+        std::fs::remove_file(files_dir.join(&src.name))?;
+    }
+    Ok(())
+}
+
+/// Splice two GGUF files into `out` (through a `.part` file).
+fn splice_files(base: &Path, donor: &Path, out: &Path, prefix: &str) -> anyhow::Result<usize> {
+    let (b, d) = (gguf::read(base)?, gguf::read(donor)?);
+    let part = out.with_extension("part");
+    let mut w = std::io::BufWriter::new(std::fs::File::create(&part)?);
+    let n = gguf::splice(&b, &d, prefix, &mut w)?;
+    std::io::Write::flush(&mut w)?;
+    drop(w);
+    std::fs::rename(&part, out)?;
+    Ok(n)
 }
 
 fn fetch(manifest: &RecipeManifest, pin: &RuntimePin, root: &Path) -> anyhow::Result<()> {
@@ -66,14 +139,20 @@ fn fetch(manifest: &RecipeManifest, pin: &RuntimePin, root: &Path) -> anyhow::Re
             println!("ok       {}", f.name);
             continue;
         }
-        ensure_free_space(&files_dir, f.bytes)?;
-        println!(
-            "download {} ({} MB, {})",
-            f.name,
-            f.bytes / 1_000_000,
-            f.license
-        );
-        download(&f.url, &dest, f.bytes, &f.sha256)?;
+        match (&f.url, &f.derive) {
+            (Some(url), _) => {
+                ensure_free_space(&files_dir, f.bytes)?;
+                println!(
+                    "download {} ({} MB, {})",
+                    f.name,
+                    f.bytes / 1_000_000,
+                    f.license
+                );
+                download(url, &dest, f.bytes, &f.sha256)?;
+            }
+            (None, Some(d)) => derive(&files_dir, f, d)?,
+            (None, None) => bail!("{} has neither a url nor a derivation", f.name),
+        }
     }
 
     let artifact = pin.host_artifact();
