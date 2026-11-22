@@ -77,6 +77,25 @@ would fail, so the budget is 1.5 GB there and a warm engine restarts once its pe
 outright (`kill -9`); a normal stop (SIGTERM, Ctrl-C) stops it, and so does
 `scripts/voice-clone-service stop`.
 
+## Measured levers
+
+Owner voice, 10 English explainer sentences with numbers and acronyms, local whisper
+large-v3-turbo word error rate (WER) and UTMOS predicted naturalness (1-5); the
+previous Kokoro narrator scored 0.0 % / 4.52. Full tables are in the PR that added
+spoken-form normalization.
+
+| Lever | WER | UTMOS | Verdict |
+|---|---|---|---|
+| this recipe, text as written | 7.5 % | 3.70 | acronyms and numbers garbled |
+| spoken-form normalization (shipped) | 1.4 % | 3.73 | the clarity fix |
+| T3 Q8 / F16, S3Gen Q8 / F16 | 0.0-0.7 % | 3.73-3.95 | first-sentence peak 1.11-1.75 GB: over the Linux 1.1 GB budget |
+| S3Gen flow decoder only at Q8 (spliced) | 0 % (6 sentences) | +0.26 | about +35 MB; a derived file, not shipped |
+| 4 decoder steps | 1.4 % | 3.84 | small gain, slower |
+| CFG 0.3/0.7, exaggeration 0.3/0.7, temperature 0.6 | 0.7-2.1 % | 3.70-3.78 | noise |
+| reference EQ or output EQ (+6 dB shelf) | 1.4 % | 3.71-3.80 | brighter, slightly less like the speaker |
+| rate 1.2 / 1.5 (WSOLA) | 0.7 / 1.4 % | 3.56 / 3.35 | intelligibility holds; a little naturalness lost |
+| best of 4 seeds per sentence | - | +0.20 | 4x the compute; needs a scorer vcd does not have |
+
 ## Not covered yet
 
 - A real-engine golden test (exact PCM hash per CPU class, HNR floor, RSS ceiling) as an

@@ -71,6 +71,14 @@ the pause between chunks scales with it. Rate 1.0 leaves the audio untouched.
 `cargo run -q -p vc-audio --example stretch -- 1.2 in.wav out.wav` applies the same
 stretch to a file.
 
+The reference decides most of how natural the voice sounds. The engine conditions on
+the first 6-10 s of it and averages the speaker across all of it, so enroll 20-30 s of
+your cleanest, most natural-sounding speech (close microphone, no room echo, no
+clipping, level around -20 LUFS) with the best clip first. In measurements with the
+owner's voice, a reference picked this way from clean recordings raised the predicted
+naturalness (UTMOS) of the same sentences from 3.68 to 4.20, more than any model or
+sampler setting.
+
 Upgrading: the database migrates itself (schema v2 adds the job rate; an older vcd
 refuses the newer database). The chunk plan of English text with numbers, acronyms, symbols or abbreviations
 differs from the previous release's, so such a job still queued or running at upgrade
