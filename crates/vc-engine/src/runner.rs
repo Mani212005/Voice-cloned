@@ -61,7 +61,7 @@ async fn run(
         job.language,
         PlanLimits {
             max_words: caps.max_chunk_words_for(job.language),
-            max_chars: caps.max_chunk_chars,
+            max_chars: caps.max_chunk_chars_for(job.language),
         },
     )
     .map_err(|_| ErrorCode::UnsplittableText)?;

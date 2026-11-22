@@ -50,6 +50,7 @@ pub(crate) fn capabilities(manifest: &RecipeManifest) -> Capabilities {
         max_chunk_words: manifest.budget.max_chunk_words,
         max_chunk_words_per_language: manifest.budget.max_chunk_words_per_language.clone(),
         max_chunk_chars: manifest.budget.max_chunk_chars,
+        max_chunk_chars_per_language: manifest.budget.max_chunk_chars_per_language.clone(),
         concurrency: 1,
         ram_budget_kib: manifest.budget.ram_budget_kib,
         deterministic: true,
@@ -372,8 +373,10 @@ mod tests {
         let c = backend().capabilities().clone();
         assert_eq!(c.backend_id, "turbo2");
         assert_eq!(c.max_chunk_words, 19);
-        assert_eq!(c.max_chunk_words_for(Language::En), 19);
+        assert_eq!(c.max_chunk_words_for(Language::En), 15);
         assert_eq!(c.max_chunk_words_for(Language::Hi), 14);
+        assert_eq!(c.max_chunk_chars_for(Language::En), 85);
+        assert_eq!(c.max_chunk_chars_for(Language::Hi), 200);
         assert_eq!(c.concurrency, 1);
         assert_eq!(c.sample_rate_hz, 24_000);
     }

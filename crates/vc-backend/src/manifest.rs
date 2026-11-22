@@ -61,6 +61,10 @@ pub struct Budget {
     /// allows within the budget.
     #[serde(default)]
     pub max_chunk_words_per_language: BTreeMap<Language, usize>,
+    /// Lower character caps for languages whose characters can carry more audio than
+    /// `max_chunk_chars` allows within the budget.
+    #[serde(default)]
+    pub max_chunk_chars_per_language: BTreeMap<Language, usize>,
     /// A warm engine is restarted before a chunk when its peak RSS so far plus this
     /// would cross `ram_budget_kib`.
     pub restart_headroom_kib: u64,
@@ -206,6 +210,16 @@ impl RecipeManifest {
         {
             return invalid("per-language word caps must be positive and at most max_chunk_words");
         }
+        if self
+            .budget
+            .max_chunk_chars_per_language
+            .values()
+            .any(|&c| c == 0 || c > self.budget.max_chunk_chars)
+        {
+            return invalid(
+                "per-language character caps must be positive and at most max_chunk_chars",
+            );
+        }
         let host_limits =
             std::iter::once((self.budget.ram_budget_kib, self.budget.restart_headroom_kib)).chain(
                 self.budget
@@ -347,7 +361,12 @@ mod tests {
         assert_eq!(m.budget.max_chunk_words, 19);
         assert_eq!(
             m.budget.max_chunk_words_per_language,
-            BTreeMap::from([(Language::Hi, 14)])
+            BTreeMap::from([(Language::En, 15), (Language::Hi, 14)])
+        );
+        assert_eq!(m.budget.max_chunk_chars, 200);
+        assert_eq!(
+            m.budget.max_chunk_chars_per_language,
+            BTreeMap::from([(Language::En, 85)])
         );
         assert_eq!(m.budget.ram_budget_kib, 1_100_000);
         assert_eq!(m.budget.restart_headroom_kib, 100_000);

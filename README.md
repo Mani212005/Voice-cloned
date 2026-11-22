@@ -50,8 +50,8 @@ this laptop's CPU.
 The speech engine is the pinned CrispASR v0.8.53 release with the `turbo2` recipe
 (Chatterbox V3 T3 + Turbo S3Gen, both Q4_K, 2 decoder steps). `vcd` keeps one engine
 process warm (its `--server` mode: models loaded, the voice already encoded) and feeds it
-one text chunk at a time: the first sentence alone, then chunks of 19 words or fewer (14
-for Hindi). While idle it gets the engine ready for the voice used next, and it restarts
+one text chunk at a time: the first sentence alone, then chunks of at most 15 words and
+85 characters for English (14 words and 200 characters for Hindi). While idle it gets the engine ready for the voice used next, and it restarts
 the engine before any chunk that could take its peak RSS over the memory budget (1.1 GB on
 Linux, 1.5 GB on macOS); a chunk that still goes over fails its job. `engine.warm = false`
 in `vcd.toml` runs a cold CLI process per chunk instead; the audio is identical. See
@@ -80,10 +80,10 @@ naturalness (UTMOS) of the same sentences from 3.68 to 4.20, more than any model
 sampler setting.
 
 Upgrading: the database migrates itself (schema v2 adds the job rate; an older vcd
-refuses the newer database). The chunk plan of English text with numbers, acronyms,
-symbols or abbreviations differs from the previous release's, so such a job still queued
-or running at upgrade fails with "chunk plan changed since the job was accepted" and must
-be resubmitted; restart the service when idle.
+refuses the newer database). English chunk plans differ from the previous release's
+(spoken form, and chunks of at most 15 words and 85 characters), so an English job still
+queued or running at upgrade can fail with "chunk plan changed since the job was accepted"
+and must be resubmitted; restart the service when idle.
 
 ```sh
 cargo xtask fetch-models          # model files + engine runtime into models/ (gitignored), verified

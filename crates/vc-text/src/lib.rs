@@ -1,9 +1,9 @@
 //! Text pipeline: spoken-form normalization, whitespace normalization and the chunk planner.
 //!
 //! The engine is run once per chunk. The first sentence is a chunk of its own, so audio
-//! starts sooner. A chunk is at most `max_words` words (19 for the turbo2 recipe, 14 for
-//! Hindi, measured to stay within the 1.1 GB engine budget) and at most `max_chars`
-//! characters. Chunks are cut at sentence boundaries first, then at clause punctuation,
+//! starts sooner. A chunk is at most `max_words` words and `max_chars` characters (for the
+//! turbo2 recipe 15 and 85 in English, 14 and 200 in Hindi, measured to stay within the
+//! 1.1 GB engine budget). Chunks are cut at sentence boundaries first, then at clause punctuation,
 //! then between words. English text is first rewritten into its spoken form ([`speakable`]),
 //! so the caps apply to the words the engine actually says. Pure functions only.
 

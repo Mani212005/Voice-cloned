@@ -42,7 +42,7 @@ cargo xtask verify         # re-check later; `vcd serve` also re-checks on every
 | `CRISPASR_S3GEN_FASTCONV` | 0 | `1` is faster in the vocoder but peaks at 1.094 GB on this recipe, too close to the budget. |
 | `-l` | `en`, or `hi` for Hindi and Hinglish | |
 | `-sl` | the reference's language, when it differs from `-l` | Cross-lingual cloning (an English reference speaking Hindi) runs T3 without guidance: better likeness and half the T3 cost. |
-| Chunk | the first sentence alone; then 19 words or fewer (14 for `hi`), cut at sentence ends, then clause marks, then between words; English words are counted after the text is put in spoken form ("467" is three words) | Time to first audio grows with the first chunk. Peak RSS grows with a chunk's audio length, and these caps keep it to about 8 s. |
+| Chunk | the first sentence alone; then at most 15 words and 85 characters for `en`, 14 words and 200 characters for `hi`; cut at sentence ends, then clause marks, then between words; English is counted after the text is put in spoken form ("467" is three words) | Time to first audio grows with the first chunk. Peak RSS grows with a chunk's audio length, and these caps keep English chunks to about 6.8 s at the slowest speaking rate measured and Hindi to about 5.5 s. |
 | Process | one warm `--server` process, restarted before a chunk once its peak RSS is above 1.0 GB (1.35 GB on macOS) | Saves the model load and the reference encode (about 6 s idle, 15 s or more under load) on every chunk. Output is bit-identical to the CLI. |
 | `--no-punctuation` | server only | Otherwise the server downloads an unpinned punctuation model that TTS does not use. |
 | `MALLOC_ARENA_MAX=1`, `MALLOC_TRIM_THRESHOLD_=0`, `MALLOC_MMAP_THRESHOLD_=65536` | engine environment | With glibc's defaults a warm engine's RSS crept about 22 MB per request and never came back (1.41 GB after 15 chunks). With these it levels off at the largest chunk served. |
@@ -54,9 +54,35 @@ KiB divided by 1e6, so `ram_budget_kib = 1100000`). `vcd` reads every chunk's pe
 `wait4`, or the warm engine's `VmHWM`) and fails the job with `memory_budget_exceeded` if
 a chunk goes over.
 
-Measured with the malloc settings (cold CLI, one chunk each): 5.8 s of audio 1.012 GB,
-6.8 s 1.046 GB, 7.8 s 1.076 GB, 9.7 s 1.099 GB (1.126 GB without the malloc settings,
-which is why Hindi chunks are capped at 14 words). A warm engine's peak after a chunk is
+Peak RSS follows a chunk's audio length: about 0.83 GB plus 0.037 GB per second, measured
+cold with the malloc settings and the owner's enrolled 14.6 s reference. References of
+12 s and 27 s fall on the same line. It crosses 1.1 GB at about 7.2 s of audio.
+
+A word cap alone does not bound the audio. Under the earlier English caps (19 words, 200
+characters), 19 long words (195 characters) spoke for 11.8 s and peaked at 1.272 GB, and
+13 of them (134 characters) for 8.6 s at 1.149 GB, so such jobs failed with
+`memory_budget_exceeded`.
+
+A character cap is only a statistical bound, because the model's pace varies: 0.056-0.080 s
+per character of ordinary and long words, 0.095 s per character of spelled-out letters.
+A 92-character comma list of long words ("every implementation, publishing detailed
+security assessments, reviews, notes, explanations.") spoke 7.3 s and peaked at 1.101 GB
+in vcd. English is therefore capped at 15 words and 85 characters, about 6.8 s at the
+slowest rate measured.
+
+Through vcd at those caps, each job opening with a short first sentence, the worst chunk
+of each kind peaked at:
+
+| English text | Chunks | Worst chunk peak |
+|---|---|---|
+| the 19-long-word sentence that used to fail | 4 | 1.042 GB |
+| a 19-word comma list | 3 | 1.025 GB |
+| long words with commas | 3 | 1.023 GB |
+| twelve acronyms (186 characters of letter names) | 4 | 1.013 GB |
+| money, counts, a range and a year | 4 | 1.044 GB |
+
+Hindi and Hinglish (cross-lingual, unguided T3) peak lower: 14 words spoke 5.4 s at
+0.950 GB. A warm engine's peak after a chunk is
 at most about the cold peak of that chunk or its own earlier peak, whichever is higher,
 plus a few MB: after the one-word warm-up it holds 0.917 GB, and pushed past its restart
 line with long Hindi chunks it reached 1.068 GB. `restart_headroom_kib = 100000` restarts

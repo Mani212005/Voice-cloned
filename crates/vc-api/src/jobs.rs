@@ -82,7 +82,7 @@ pub async fn create(
         language,
         PlanLimits {
             max_words: caps.max_chunk_words_for(language),
-            max_chars: caps.max_chunk_chars,
+            max_chars: caps.max_chunk_chars_for(language),
         },
     )
     .map_err(|e| match e {
