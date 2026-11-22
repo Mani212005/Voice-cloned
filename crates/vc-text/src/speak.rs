@@ -228,6 +228,12 @@ fn split_tok(raw: &str) -> Tok<'_> {
     Tok { lead, core, trail }
 }
 
+/// Whether a kept final period may also end the sentence ("etc.", "9 a.m.", "the U.S.").
+fn keeps_sentence_dot(core: &str) -> bool {
+    matches!(core, "etc." | "a.m." | "p.m.")
+        || (core.ends_with('.') && dotted_letters(core).is_some())
+}
+
 /// Whether a token ending in '.' is an abbreviation whose dot is part of it.
 fn keeps_final_dot(t: &str) -> bool {
     FIXED.iter().any(|(k, _)| *k == t) || dotted_letters(t).is_some()
@@ -247,9 +253,19 @@ fn speak_line(line: &str) -> String {
         } else {
             t.trail
         };
-        let mut s = String::with_capacity(t.lead.len() + spoken.len() + trail.len());
+        let last = if consumed_next { next.unwrap_or(t) } else { t };
+        let after = toks.get(i + 1 + usize::from(consumed_next));
+        let ends_sentence = after.is_none_or(|n| n.core.starts_with(char::is_uppercase));
+        let mut s = String::with_capacity(t.lead.len() + spoken.len() + trail.len() + 1);
         s.push_str(t.lead);
         s.push_str(&spoken);
+        if ends_sentence
+            && keeps_sentence_dot(last.core)
+            && !spoken.ends_with('.')
+            && !trail.starts_with(['.', ',', ';', ':', '!', '?', '\u{2026}'])
+        {
+            s.push('.');
+        }
         s.push_str(trail);
         if !s.is_empty() {
             out.push(s);
@@ -916,7 +932,8 @@ mod tests {
 
     #[test]
     fn times_ordinals_decades_versions() {
-        assert_eq!(s("at 10:30 a.m."), "at ten thirty ay em");
+        assert_eq!(s("at 10:30 a.m."), "at ten thirty ay em.");
+        assert_eq!(s("at 10:30 a.m. it ends"), "at ten thirty ay em it ends");
         assert_eq!(s("at 9:05"), "at nine oh five");
         assert_eq!(s("by 10:00,"), "by ten o'clock,");
         assert_eq!(
@@ -953,13 +970,27 @@ mod tests {
         assert_eq!(s("I am A student"), "I am A student");
         assert_eq!(
             s("OK, e.g. this, i.e. that, etc."),
-            "okay, for example this, that is that, et cetera"
+            "okay, for example this, that is that, et cetera."
         );
         assert_eq!(s("Dr. Smith vs. Mr. Rao"), "Doctor Smith versus Mister Rao");
         assert_eq!(s("Visit signal.org today"), "Visit signal dot org today");
         assert_eq!(s("cats & dogs"), "cats and dogs");
         assert_eq!(s("(AI)"), "(ay eye)");
         assert_eq!(s("\"CPU,\" she said"), "\"see pee you,\" she said");
+    }
+
+    #[test]
+    fn sentence_final_abbreviations_keep_their_period() {
+        assert_eq!(
+            s("pears, etc. Then we left at 9 a.m. It was fine."),
+            "pears, et cetera. Then we left at nine ay em. It was fine."
+        );
+        assert_eq!(s("Use U.S. rules."), "Use you ess rules.");
+        assert_eq!(s("Use the U.S."), "Use the you ess.");
+        assert_eq!(s("(pears, etc.)"), "(pears, et cetera.)");
+        assert_eq!(s("pears, etc., and more"), "pears, et cetera, and more");
+        assert_eq!(s("e.g. Paris"), "for example Paris");
+        assert_eq!(s("Dr. Smith"), "Doctor Smith");
     }
 
     #[test]
@@ -978,6 +1009,7 @@ mod tests {
         for t in [
             "It costs $0 and 467 CPU tasks in 40-80 ms on iOS, 50% in 2013.",
             "Version 7.2 at 10:30 a.m. on the 21st, GPT-4, the U.S.",
+            "pears, etc. Then 9 a.m. It was the U.S. Army.",
         ] {
             let once = s(t);
             assert_eq!(s(&once), once, "{t}");

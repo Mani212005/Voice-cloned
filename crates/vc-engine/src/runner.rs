@@ -114,7 +114,11 @@ async fn run(
         let pcm = if job.rate.is_native() {
             out.pcm
         } else {
-            vc_audio::time_stretch(&out.pcm, job.rate.as_f64())
+            let rate = job.rate.as_f64();
+            let raw = out.pcm;
+            tokio::task::spawn_blocking(move || vc_audio::time_stretch(&raw, rate))
+                .await
+                .map_err(|e| internal("time-stretch task", &e))?
                 .map_err(|e| internal("time-stretch chunk", &e))?
         };
         let wav = vc_audio::encode_wav_bytes(&pcm).map_err(|e| internal("encode chunk", &e))?;
