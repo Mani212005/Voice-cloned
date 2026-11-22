@@ -51,13 +51,13 @@ The speech engine is the pinned CrispASR v0.8.53 release with the `turbo2` recip
 (Chatterbox V3 T3 at Q4_K + Turbo S3Gen at Q4_K with its flow decoder at Q8_0, 2 decoder
 steps, for English and Hindi alike). `vcd` keeps one engine process warm (its `--server`
 mode: models loaded, the voice already encoded) and feeds it one text chunk at a time: the
-first sentence alone, then chunks of at most 13 words and 85 characters for English (12
-words and 55 characters for Hindi, where a digit counts as 5 characters and an acronym
-letter as 3, because Hindi text reaches the engine as written). While idle it gets the engine ready for the voice used
-next, and it restarts the engine before any chunk that could take its peak RSS over the
-memory budget (1.1 GB on Linux, 1.5 GB on macOS); a chunk that still goes over fails its
-job. `engine.warm = false` in `vcd.toml` runs a cold CLI process per chunk instead; the
-audio is identical. See
+first sentence alone, then chunks capped in words and characters per language so that
+their audio stays within the memory budget (13 words and 85 characters for English). While
+idle it gets the engine ready for the voice used next, and it restarts the engine before
+any chunk that could take its peak RSS over the memory budget (1.1 GB on Linux, 1.5 GB on
+macOS); a chunk that still goes over fails its job. `engine.warm = false` in `vcd.toml`
+runs a cold CLI process per chunk instead; the audio is identical. The caps for each
+language and the memory measurements behind them are in
 [`models/recipes/turbo2/README.md`](models/recipes/turbo2/README.md).
 
 English text is rewritten into its spoken form before it is chunked, because the engine
@@ -87,10 +87,10 @@ refuses the newer database). Run `cargo xtask fetch-models` again (on a Mac,
 `scripts/voice-clone-service install`): the S3Gen file is now
 `chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf`, built locally from two published files, and a
 vcd without it refuses to start. The voice sounds more natural in both languages and the
-engine peaks about 32 MB higher. Chunk plans differ from the previous release's (English
-chunks of at most 13 words and 85 characters after the spoken form, Hindi 12 words and 55
-weighted characters), so a job still queued or running at upgrade can fail with "chunk plan changed
-since the job was accepted" and must be resubmitted; restart the service when idle.
+engine peaks about 32 MB higher. Chunk plans differ from the previous release's (new
+chunk caps, and English is chunked after the spoken form), so a job still queued or running
+at upgrade can fail with "chunk plan changed since the job was accepted" and must be
+resubmitted; restart the service when idle.
 
 ```sh
 cargo xtask fetch-models          # model files + engine runtime into models/ (gitignored), verified
