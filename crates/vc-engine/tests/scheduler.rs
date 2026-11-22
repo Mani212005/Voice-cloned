@@ -100,15 +100,8 @@ impl Fx {
     }
 
     fn new_job(&self, text: &str, language: Language, max_words: usize) -> NewJob {
-        let plan = vc_text::plan_speech(
-            text,
-            language,
-            vc_text::PlanLimits {
-                max_words,
-                max_chars: 200,
-            },
-        )
-        .unwrap();
+        let plan =
+            vc_text::plan_speech(text, language, vc_text::PlanLimits::new(max_words, 200)).unwrap();
         NewJob {
             id: JobId::generate(),
             voice_id: self.voice,

@@ -65,7 +65,7 @@ proptest! {
     /// fails cleanly.
     #[test]
     fn spoken_plans_respect_the_limits(t in text()) {
-        let limits = PlanLimits { max_words: 19, max_chars: 200 };
+        let limits = PlanLimits::new(19, 200);
         if let Ok(p) = plan_speech(&t, Language::En, limits) {
             for c in &p.chunks {
                 prop_assert!(c.words <= limits.max_words && c.chars <= limits.max_chars);

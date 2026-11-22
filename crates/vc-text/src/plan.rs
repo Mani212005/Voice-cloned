@@ -15,7 +15,62 @@ const CLOSERS: &[char] = &['"', '\'', ')', ']', '\u{201D}', '\u{2019}', '\u{00BB
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanLimits {
     pub max_words: usize,
+    /// Cap on a chunk's length in characters, each weighted by [`CharWeights`].
     pub max_chars: usize,
+    pub weights: CharWeights,
+}
+
+impl PlanLimits {
+    /// Limits where every character counts once.
+    pub const fn new(max_words: usize, max_chars: usize) -> Self {
+        Self {
+            max_words,
+            max_chars,
+            weights: CharWeights::PLAIN,
+        }
+    }
+}
+
+/// How many characters some characters count as against `max_chars`. Text the engine is
+/// given as written can take much longer to say per character than words do: a digit is
+/// read as a number word, a capital of an acronym as a letter name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharWeights {
+    /// Each digit, in any script.
+    pub digit: usize,
+    /// Each letter of a run of two or more capitals ("API", the "GPU" of "GPUs").
+    pub acronym_letter: usize,
+}
+
+impl CharWeights {
+    pub const PLAIN: Self = Self {
+        digit: 1,
+        acronym_letter: 1,
+    };
+}
+
+/// The length of `text` against `max_chars`: its characters, with digits and acronym
+/// letters counted as `weights` says.
+pub fn weighted_chars(text: &str, weights: CharWeights) -> usize {
+    let mut total = 0;
+    let mut capitals = 0;
+    let close = |capitals: usize| {
+        if capitals >= 2 {
+            capitals * weights.acronym_letter
+        } else {
+            capitals
+        }
+    };
+    for c in text.chars() {
+        if c.is_uppercase() {
+            capitals += 1;
+            continue;
+        }
+        total += close(capitals);
+        capitals = 0;
+        total += if c.is_numeric() { weights.digit } else { 1 };
+    }
+    total + close(capitals)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +90,9 @@ pub struct ChunkPlan {
 pub enum PlanError {
     #[error("text is empty")]
     Empty,
-    #[error("a single word is longer than {max_chars} characters")]
+    #[error(
+        "a single word is longer than {max_chars} characters (a digit or an acronym letter may count as several)"
+    )]
     Unsplittable { max_chars: usize },
     #[error("invalid limits")]
     InvalidLimits,
@@ -51,7 +108,11 @@ pub enum PlanError {
 /// chunk texts with single spaces gives the normalized text with line breaks turned into
 /// spaces.
 pub fn plan(text: &str, limits: PlanLimits) -> Result<ChunkPlan, PlanError> {
-    if limits.max_words == 0 || limits.max_chars == 0 {
+    if limits.max_words == 0
+        || limits.max_chars == 0
+        || limits.weights.digit == 0
+        || limits.weights.acronym_letter == 0
+    {
         return Err(PlanError::InvalidLimits);
     }
     let normalized = normalize(text);
@@ -138,17 +199,18 @@ fn is_weak_end(word: &str) -> bool {
     initial || ABBREVIATIONS.contains(&stem.to_lowercase().as_str())
 }
 
-fn chars_of(words: &[&str]) -> usize {
-    let letters: usize = words.iter().map(|w| w.chars().count()).sum();
+fn chars_of(words: &[&str], weights: CharWeights) -> usize {
+    let letters: usize = words.iter().map(|w| weighted_chars(w, weights)).sum();
     letters + words.len().saturating_sub(1)
 }
 
 fn fits(current: &[&str], extra: &[&str], limits: PlanLimits) -> bool {
     let words = current.len() + extra.len();
+    let w = limits.weights;
     let chars = match (current.is_empty(), extra.is_empty()) {
-        (true, _) => chars_of(extra),
-        (false, true) => chars_of(current),
-        (false, false) => chars_of(current) + 1 + chars_of(extra),
+        (true, _) => chars_of(extra, w),
+        (false, true) => chars_of(current, w),
+        (false, false) => chars_of(current, w) + 1 + chars_of(extra, w),
     };
     words <= limits.max_words && chars <= limits.max_chars
 }
@@ -175,10 +237,7 @@ fn cut_point(words: &[&str], limits: PlanLimits) -> Result<usize, PlanError> {
 mod tests {
     use super::*;
 
-    const TURBO2: PlanLimits = PlanLimits {
-        max_words: 19,
-        max_chars: 200,
-    };
+    const TURBO2: PlanLimits = PlanLimits::new(19, 200);
 
     fn texts(p: &ChunkPlan) -> Vec<&str> {
         p.chunks.iter().map(|c| c.text.as_str()).collect()
@@ -238,10 +297,7 @@ mod tests {
 
     #[test]
     fn a_long_first_sentence_is_cut_and_its_remainder_does_not_pack_with_the_next() {
-        let limits = PlanLimits {
-            max_words: 4,
-            max_chars: 200,
-        };
+        let limits = PlanLimits::new(4, 200);
         let p = plan("aa bb cc dd ee ff. gg. hh.", limits).unwrap();
         assert_eq!(texts(&p), ["aa bb cc dd", "ee ff.", "gg. hh."]);
     }
@@ -263,10 +319,7 @@ mod tests {
 
     #[test]
     fn devanagari_danda_ends_a_sentence() {
-        let limits = PlanLimits {
-            max_words: 3,
-            max_chars: 200,
-        };
+        let limits = PlanLimits::new(3, 200);
         let p = plan("मैं ठीक हूँ। आप कैसे हैं?", limits).unwrap();
         assert_eq!(texts(&p), ["मैं ठीक हूँ।", "आप कैसे हैं?"]);
     }
@@ -294,40 +347,28 @@ mod tests {
 
     #[test]
     fn remainder_of_a_cut_sentence_packs_with_the_next() {
-        let limits = PlanLimits {
-            max_words: 4,
-            max_chars: 200,
-        };
+        let limits = PlanLimits::new(4, 200);
         let p = plan("xx. aa bb cc dd ee ff. gg.", limits).unwrap();
         assert_eq!(texts(&p), ["xx.", "aa bb cc dd", "ee ff. gg."]);
     }
 
     #[test]
     fn decimal_point_does_not_end_a_sentence() {
-        let limits = PlanLimits {
-            max_words: 3,
-            max_chars: 200,
-        };
+        let limits = PlanLimits::new(3, 200);
         let p = plan("It costs 3.5 rupees today.", limits).unwrap();
         assert_eq!(texts(&p), ["It costs 3.5", "rupees today."]);
     }
 
     #[test]
     fn newline_is_a_boundary_and_joins_as_space() {
-        let limits = PlanLimits {
-            max_words: 2,
-            max_chars: 200,
-        };
+        let limits = PlanLimits::new(2, 200);
         let p = plan("hello world\nsecond line", limits).unwrap();
         assert_eq!(texts(&p), ["hello world", "second line"]);
     }
 
     #[test]
     fn overlong_word_is_unsplittable() {
-        let limits = PlanLimits {
-            max_words: 19,
-            max_chars: 5,
-        };
+        let limits = PlanLimits::new(19, 5);
         assert_eq!(
             plan("ok abcdefgh", limits),
             Err(PlanError::Unsplittable { max_chars: 5 })
@@ -344,5 +385,45 @@ mod tests {
         let words: Vec<String> = (1..=100).map(|i| format!("w{i}.")).collect();
         let p = plan(&words.join(" "), TURBO2).unwrap();
         assert!(p.chunks.iter().enumerate().all(|(i, c)| c.idx == i));
+    }
+
+    const HINDI: CharWeights = CharWeights {
+        digit: 5,
+        acronym_letter: 3,
+    };
+
+    #[test]
+    fn digits_and_acronym_letters_weigh_more() {
+        assert_eq!(weighted_chars("abc def", HINDI), 7);
+        assert_eq!(weighted_chars("2013", HINDI), 20);
+        assert_eq!(weighted_chars("\u{0968}\u{0966}", HINDI), 10);
+        // A run of two or more capitals is an acronym; one capital is not.
+        assert_eq!(weighted_chars("API,", HINDI), 10);
+        assert_eq!(weighted_chars("GPUs", HINDI), 10);
+        assert_eq!(weighted_chars("Users", HINDI), 5);
+        assert_eq!(weighted_chars("GPT-4", HINDI), 9 + 1 + 5);
+        assert_eq!(weighted_chars("2013 API", CharWeights::PLAIN), 8);
+    }
+
+    #[test]
+    fn weighted_characters_count_against_the_cap() {
+        let limits = PlanLimits {
+            max_words: 12,
+            max_chars: 30,
+            weights: HINDI,
+        };
+        let p = plan("सुनो। 2013 में 1250 लोग थे और 2014 में 4670 लोग।", limits).unwrap();
+        for c in &p.chunks {
+            assert!(weighted_chars(&c.text, HINDI) <= 30, "{c:?}");
+        }
+        assert_eq!(p.chunks.len(), 5, "{p:?}");
+        let zero = PlanLimits {
+            weights: CharWeights {
+                digit: 0,
+                acronym_letter: 1,
+            },
+            ..limits
+        };
+        assert_eq!(plan("a b", zero), Err(PlanError::InvalidLimits));
     }
 }

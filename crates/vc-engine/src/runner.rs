@@ -7,7 +7,6 @@ use vc_audio::MonoPcm;
 use vc_backend::{BackendError, ChunkRequest};
 use vc_core::{ErrorCode, JobId};
 use vc_store::ChunkRow;
-use vc_text::PlanLimits;
 
 use crate::{EngineContext, JobEvent};
 
@@ -56,15 +55,8 @@ async fn run(
         .map_err(|e| internal("load voice", &e))?;
     let text = job.text.ok_or_else(|| internal("job text", &"missing"))?;
     let caps = ctx.backend.capabilities();
-    let plan = vc_text::plan_speech(
-        &text,
-        job.language,
-        PlanLimits {
-            max_words: caps.max_chunk_words_for(job.language),
-            max_chars: caps.max_chunk_chars_for(job.language),
-        },
-    )
-    .map_err(|_| ErrorCode::UnsplittableText)?;
+    let plan = vc_text::plan_speech(&text, job.language, caps.plan_limits_for(job.language))
+        .map_err(|_| ErrorCode::UnsplittableText)?;
     if plan.chunks.len() != job.chunks_total {
         return Err(internal(
             "chunk plan",

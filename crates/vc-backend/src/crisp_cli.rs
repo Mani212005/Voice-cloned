@@ -3,7 +3,7 @@
 //! Every chunk pays for loading the models and encoding the reference (about 6 s on an
 //! idle laptop, 15 s or more under load), which is why vcd normally runs
 //! [`crate::CrispWarmBackend`]. This one stays as the `engine.warm = false` fallback: a
-//! fresh process per chunk keeps every chunk's peak RSS at the measured 1.00-1.07 GB,
+//! fresh process per chunk keeps every chunk's peak RSS at the measured 1.00-1.08 GB,
 //! makes cancel a process-group kill, and contains engine crashes.
 
 use std::ffi::OsString;
@@ -51,6 +51,7 @@ pub(crate) fn capabilities(manifest: &RecipeManifest) -> Capabilities {
         max_chunk_words_per_language: manifest.budget.max_chunk_words_per_language.clone(),
         max_chunk_chars: manifest.budget.max_chunk_chars,
         max_chunk_chars_per_language: manifest.budget.max_chunk_chars_per_language.clone(),
+        char_weights_per_language: manifest.budget.char_weights_per_language.clone(),
         concurrency: 1,
         ram_budget_kib: manifest.budget.ram_budget_kib,
         deterministic: true,
@@ -315,7 +316,7 @@ mod tests {
                 "-m",
                 "/m/chatterbox-v3-t3-q4_k.gguf",
                 "--codec-model",
-                "/m/chatterbox-turbo-s3gen-q4_k.gguf",
+                "/m/chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf",
                 "-t",
                 "6",
                 "-l",
@@ -373,10 +374,17 @@ mod tests {
         let c = backend().capabilities().clone();
         assert_eq!(c.backend_id, "turbo2");
         assert_eq!(c.max_chunk_words, 19);
-        assert_eq!(c.max_chunk_words_for(Language::En), 15);
-        assert_eq!(c.max_chunk_words_for(Language::Hi), 14);
+        assert_eq!(c.max_chunk_words_for(Language::En), 13);
+        assert_eq!(c.max_chunk_words_for(Language::Hi), 12);
         assert_eq!(c.max_chunk_chars_for(Language::En), 85);
-        assert_eq!(c.max_chunk_chars_for(Language::Hi), 200);
+        assert_eq!(c.max_chunk_chars_for(Language::Hi), 55);
+        let hi = c.plan_limits_for(Language::Hi);
+        assert_eq!((hi.max_words, hi.max_chars), (12, 55));
+        assert_eq!((hi.weights.digit, hi.weights.acronym_letter), (5, 3));
+        assert_eq!(
+            c.plan_limits_for(Language::En),
+            vc_text::PlanLimits::new(13, 85)
+        );
         assert_eq!(c.concurrency, 1);
         assert_eq!(c.sample_rate_hz, 24_000);
     }

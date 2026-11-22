@@ -48,14 +48,16 @@ first sentence is heard after roughly 10-13 s, and the rest runs slower than rea
 this laptop's CPU.
 
 The speech engine is the pinned CrispASR v0.8.53 release with the `turbo2` recipe
-(Chatterbox V3 T3 + Turbo S3Gen, both Q4_K, 2 decoder steps). `vcd` keeps one engine
-process warm (its `--server` mode: models loaded, the voice already encoded) and feeds it
-one text chunk at a time: the first sentence alone, then chunks of at most 15 words and
-85 characters for English (14 words and 200 characters for Hindi). While idle it gets the
-engine ready for the voice used next, and it restarts the engine before any chunk that
-could take its peak RSS over the memory budget (1.1 GB on Linux, 1.5 GB on macOS); a chunk
-that still goes over fails its job. `engine.warm = false` in `vcd.toml` runs a cold CLI
-process per chunk instead; the audio is identical. See
+(Chatterbox V3 T3 at Q4_K + Turbo S3Gen at Q4_K with its flow decoder at Q8_0, 2 decoder
+steps, for English and Hindi alike). `vcd` keeps one engine process warm (its `--server`
+mode: models loaded, the voice already encoded) and feeds it one text chunk at a time: the
+first sentence alone, then chunks capped in words and characters per language so that
+their audio stays within the memory budget (13 words and 85 characters for English). While
+idle it gets the engine ready for the voice used next, and it restarts the engine before
+any chunk that could take its peak RSS over the memory budget (1.1 GB on Linux, 1.5 GB on
+macOS); a chunk that still goes over fails its job. `engine.warm = false` in `vcd.toml`
+runs a cold CLI process per chunk instead; the audio is identical. The caps for each
+language and the memory measurements behind them are in
 [`models/recipes/turbo2/README.md`](models/recipes/turbo2/README.md).
 
 English text is rewritten into its spoken form before it is chunked, because the engine
@@ -81,10 +83,14 @@ naturalness (UTMOS) of the same sentences from 3.68 to 4.20, more than any model
 sampler setting.
 
 Upgrading: the database migrates itself (schema v2 adds the job rate; an older vcd
-refuses the newer database). English chunk plans differ from the previous release's
-(spoken form, and chunks of at most 15 words and 85 characters), so an English job still
-queued or running at upgrade can fail with "chunk plan changed since the job was accepted"
-and must be resubmitted; restart the service when idle.
+refuses the newer database). Run `cargo xtask fetch-models` again (on a Mac,
+`scripts/voice-clone-service install`): the S3Gen file is now
+`chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf`, built locally from two published files, and a
+vcd without it refuses to start. The voice sounds more natural in both languages and the
+engine peaks about 32 MB higher. Chunk plans differ from the previous release's (new
+chunk caps, and English is chunked after the spoken form), so a job still queued or running
+at upgrade can fail with "chunk plan changed since the job was accepted" and must be
+resubmitted; restart the service when idle.
 
 ```sh
 cargo xtask fetch-models          # model files + engine runtime into models/ (gitignored), verified
@@ -149,8 +155,9 @@ scripts/voice-clone-service start    # first run: builds vcd, fetches and verifi
 ```
 
 The first run needs Rust (`cargo`) and about 1 GB of free disk for the build, which it
-deletes afterwards, plus 0.7 GB for the models and engine. It then installs `vcd` and a copy
-of the script into the home, so later runs need no checkout and only start the service:
+deletes afterwards, plus 0.7 GB for the models and engine (1.3 GB while the S3Gen file is
+built from its two published inputs, which are then removed). It then installs `vcd` and a
+copy of the script into the home, so later runs need no checkout and only start the service:
 
 ```sh
 ~/.local/share/voice-clone/bin/voice-clone-service start    # background, 127.0.0.1:8740 only; waits for /v1/health

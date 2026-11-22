@@ -120,6 +120,9 @@ pub struct Capabilities {
     pub max_chunk_chars: usize,
     /// Lower character caps for some languages, so every chunk stays within the RAM budget.
     pub max_chunk_chars_per_language: BTreeMap<Language, usize>,
+    /// Digits and acronym letters count as several characters in some languages; see
+    /// [`Capabilities::plan_limits_for`].
+    pub char_weights_per_language: BTreeMap<Language, manifest::CharWeights>,
     /// Engine processes that may run at once.
     pub concurrency: u32,
     pub ram_budget_kib: u64,
@@ -145,6 +148,19 @@ impl Capabilities {
             .get(&language)
             .copied()
             .unwrap_or(self.max_chunk_chars)
+    }
+
+    /// The chunk planner's limits for `language`: its word and character caps, with digits
+    /// and acronym letters weighted where the recipe says so.
+    pub fn plan_limits_for(&self, language: Language) -> vc_text::PlanLimits {
+        vc_text::PlanLimits {
+            max_words: self.max_chunk_words_for(language),
+            max_chars: self.max_chunk_chars_for(language),
+            weights: self
+                .char_weights_per_language
+                .get(&language)
+                .map_or(vc_text::CharWeights::PLAIN, |&w| w.into()),
+        }
     }
 }
 

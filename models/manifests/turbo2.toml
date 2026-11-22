@@ -1,10 +1,10 @@
 # Recipe "turbo2": the v1 voice engine.
 #
-# Chatterbox V3 T3 (Q4_K, used as published) + Chatterbox Turbo S3Gen (Q4_K, published,
-# 2-step "meanflow" decoder), run by the pinned CrispASR CLI. Chosen over best1 (V3 T3 +
-# spliced s-v3voc S3Gen, 6 decoder steps) because it is 4-5x cheaper in CPU with equal
-# speaker similarity and intelligibility in English and Hindi, at 0.4-0.5 dB lower HNR.
-# No spliced file is needed. See models/recipes/turbo2/README.md.
+# Chatterbox V3 T3 (Q4_K, used as published) + Chatterbox Turbo S3Gen (Q4_K with its flow
+# decoder at Q8_0, spliced from two published files; 2-step "meanflow" decoder), run by the
+# pinned CrispASR CLI. Chosen over best1 (V3 T3 + spliced s-v3voc S3Gen, 6 decoder steps)
+# because it is 4-5x cheaper in CPU with equal speaker similarity and intelligibility in
+# English and Hindi. See models/recipes/turbo2/README.md.
 id = "turbo2"
 kind = "crispasr-cli"
 runtime = "third_party/crispasr/PIN.toml"
@@ -17,13 +17,33 @@ bytes = 386367392
 sha256 = "fb63d7c53c4f8bb07286d67709c4d4200fa63b4de3476a4558f37964ce8e5aa6"
 license = "MIT"
 
+# The published Q4_K Turbo S3Gen with its flow decoder (the s3.fd.* tensors, the part that
+# shapes the voice's texture) taken from the published Q8_0 file. Built by
+# `cargo xtask fetch-models` with a deterministic splice and pinned like a download: +33 MB
+# of weights, +32 MB of peak RSS, and higher predicted naturalness (UTMOS) on the owner's
+# voice in English and Hindi. Every other tensor, including the vocoder and the speech
+# tokenizer, is byte for byte the published Q4_K file.
 [[files]]
 role = "s3gen"
+name = "chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf"
+bytes = 288823584
+sha256 = "ca43f0bba6ca1b3f3a40ab958d9900dbc709430ff3afb9f962ff990ec950d613"
+license = "MIT"
+
+[files.derive]
+tensor_prefix = "s3.fd."
+
+[files.derive.base]
 name = "chatterbox-turbo-s3gen-q4_k.gguf"
 url = "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/b544cf8b49504d880640864a757b3ff3e4421a42/chatterbox-turbo-s3gen-q4_k.gguf"
 bytes = 255891744
 sha256 = "1c16251e6722c46500ebddd92be495e0dba160c31169f4b64d833acba819b060"
-license = "MIT"
+
+[files.derive.donor]
+name = "chatterbox-turbo-s3gen-q8_0.gguf"
+url = "https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/b544cf8b49504d880640864a757b3ff3e4421a42/chatterbox-turbo-s3gen-q8_0.gguf"
+bytes = 366820384
+sha256 = "a77e3ef2559e8c4411b06a2692eb35646a43b0e5eef899633271aa281122e750"
 
 [engine]
 backend = "chatterbox"
@@ -51,25 +71,33 @@ MALLOC_MMAP_THRESHOLD_ = "65536"
 [budget]
 # 1.1 GB in the unit of the evidence base: ru_maxrss in KiB divided by 1e6.
 ram_budget_kib = 1100000
-# Peak RSS follows a chunk's audio length: about 0.83 GB plus 0.037 GB per second (cold,
-# malloc settings above, the owner's enrolled 14.6 s reference; 12 s and 27 s references
-# fall on the same line). It crosses 1.1 GB at about 7.2 s. Words alone do not bound the
-# audio: 19 long English words (195 characters) spoke for 11.8 s and peaked at 1.272 GB,
-# 13 of them (134 characters) 8.6 s and 1.149 GB. Characters do not bound it exactly
-# either: the model spoke 0.056-0.080 s per character of words and 0.095 s per character
-# of spelled letters, and a 92-character comma list of long words spoke 7.3 s and peaked
-# at 1.101 GB in vcd. English is therefore also capped at 15 words and 85 characters
-# (about 6.8 s at the slowest rate measured). Through vcd at these caps the worst chunk
-# (long words, comma lists, letter names, spelled numbers) peaked at 1.044 GB. Hindi and
-# Hinglish (cross-lingual, unguided T3) peak lower: 14 words spoke 5.4 s at 0.950 GB.
+# Peak RSS follows a chunk's audio length: for English about 0.86 GB plus 0.037 GB per
+# second (cold, malloc settings above, the owner's enrolled 14.6 s reference; 12 s and 27 s
+# references fall on the same line), so it crosses 1.1 GB at about 6.5 s. The flow decoder
+# at Q8_0 adds a constant 32 MB to every peak (0.83 GB with the published Q4_K file). Hindi
+# and Hinglish (cross-lingual, unguided T3) sit about 30 MB lower on the same slope and
+# cross at about 7.4 s. Neither words nor characters bound the audio exactly. English spoke
+# 0.056-0.080 s per character of words, 0.095 s per character of spelled letters and up to
+# 0.45 s per short word (13 short words spoke 5.8 s, so 15 would pass 6.5 s). Hindi is
+# given to the engine as written: 0.069-0.123 s per character (slowest in comma lists of
+# long English words) and up to 0.51 s per word, but about 0.48 s per digit (read as Hindi
+# number words) and 0.26 s per acronym letter. Under the earlier caps (English 15 words and
+# 85 characters, Hindi 14 and 200) 19 long English words peaked at 1.272 GB, 14 Hinglish
+# words of long English terms (165 characters) at 1.299 GB and a 70-character Hindi
+# sentence with four numbers at 1.278 GB. The caps below keep chunks to about 6.8 s at the
+# slowest rates measured, with a Hindi digit counted as 5 characters and an acronym letter
+# as 3. Through vcd, cold and warm, the worst chunk at these caps peaked at 1.080 GB in
+# English (comma lists of long words, short-word lists, letter names, spelled numbers) and
+# 1.067 GB in Hindi and Hinglish (numbers, acronyms, long English terms, formal Hindi).
 max_chunk_words = 19
 max_chunk_chars = 200
-max_chunk_words_per_language = { en = 15, hi = 14 }
-max_chunk_chars_per_language = { en = 85 }
+max_chunk_words_per_language = { en = 13, hi = 12 }
+max_chunk_chars_per_language = { en = 85, hi = 55 }
+char_weights_per_language = { hi = { digit = 5, acronym_letter = 3 } }
 # A warm engine is restarted before a chunk when its peak RSS so far plus this headroom
 # would cross the budget (so above 1.0 GB). A chunk lifts a warm engine's peak to about
-# the larger of its own cold peak (at most about 1.07 GB under the caps above) and the
-# engine's earlier peak, plus a few MB; the worst measured was 1.068 GB.
+# the larger of its own cold peak (at most about 1.08 GB under the caps above) and the
+# engine's earlier peak, plus a few MB; the worst measured was 1.080 GB.
 restart_headroom_kib = 100000
 
 # Apple Silicon macOS, used instead of the two limits above (the kernel's footprint

@@ -1497,6 +1497,7 @@ dependencies = [
  "tracing",
  "vc-audio",
  "vc-core",
+ "vc-text",
 ]
 
 [[package]]

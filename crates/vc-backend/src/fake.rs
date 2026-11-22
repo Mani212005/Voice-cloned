@@ -114,6 +114,7 @@ impl FakeBackend {
                 max_chunk_words_per_language: Default::default(),
                 max_chunk_chars,
                 max_chunk_chars_per_language: Default::default(),
+                char_weights_per_language: Default::default(),
                 concurrency: 1,
                 ram_budget_kib: 1_100_000,
                 deterministic: true,
