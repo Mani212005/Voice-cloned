@@ -51,10 +51,11 @@ The speech engine is the pinned CrispASR v0.8.53 release with the `turbo2` recip
 (Chatterbox V3 T3 + Turbo S3Gen, both Q4_K, 2 decoder steps). `vcd` keeps one engine
 process warm (its `--server` mode: models loaded, the voice already encoded) and feeds it
 one text chunk at a time: the first sentence alone, then chunks of at most 15 words and
-85 characters for English (14 words and 200 characters for Hindi). While idle it gets the engine ready for the voice used next, and it restarts
-the engine before any chunk that could take its peak RSS over the memory budget (1.1 GB on
-Linux, 1.5 GB on macOS); a chunk that still goes over fails its job. `engine.warm = false`
-in `vcd.toml` runs a cold CLI process per chunk instead; the audio is identical. See
+85 characters for English (14 words and 200 characters for Hindi). While idle it gets the
+engine ready for the voice used next, and it restarts the engine before any chunk that
+could take its peak RSS over the memory budget (1.1 GB on Linux, 1.5 GB on macOS); a chunk
+that still goes over fails its job. `engine.warm = false` in `vcd.toml` runs a cold CLI
+process per chunk instead; the audio is identical. See
 [`models/recipes/turbo2/README.md`](models/recipes/turbo2/README.md).
 
 English text is rewritten into its spoken form before it is chunked, because the engine
@@ -128,8 +129,8 @@ references, outputs or recordings; tests use synthetic audio only.
 Workspace: `crates/vc-core` (ids, job states, rate, error codes), `vc-text` (spoken form,
 chunk planner), `vc-audio` (WAV, time-stretch), `vc-backend` (`Backend` trait,
 `CrispWarmBackend` and its restart policy, `CrispCliBackend`, fakes, process control),
-`vc-store` (SQLite + data dir), `vc-engine` (scheduler: one engine slot, queue, cancel, recovery, retention), `vc-api`
-(axum routes), `vcd` (the binary), `xtask`.
+`vc-store` (SQLite + data dir), `vc-engine` (scheduler: one engine slot, queue, cancel,
+recovery, retention), `vc-api` (axum routes), `vcd` (the binary), `xtask`.
 
 Not in v1 yet: encryption at rest and crypto-erase, server-sent progress events and
 per-chunk downloads, `/v1/speech` streaming, C2PA signing of the joined output, metrics,
