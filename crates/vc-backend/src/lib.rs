@@ -116,7 +116,10 @@ pub struct Capabilities {
     pub max_chunk_words: usize,
     /// Lower word caps for some languages, so every chunk stays within the RAM budget.
     pub max_chunk_words_per_language: BTreeMap<Language, usize>,
+    /// Character cap of a chunk; see [`Capabilities::max_chunk_chars_for`].
     pub max_chunk_chars: usize,
+    /// Lower character caps for some languages, so every chunk stays within the RAM budget.
+    pub max_chunk_chars_per_language: BTreeMap<Language, usize>,
     /// Engine processes that may run at once.
     pub concurrency: u32,
     pub ram_budget_kib: u64,
@@ -134,6 +137,14 @@ impl Capabilities {
             .get(&language)
             .copied()
             .unwrap_or(self.max_chunk_words)
+    }
+
+    /// Character cap of a chunk in `language`.
+    pub fn max_chunk_chars_for(&self, language: Language) -> usize {
+        self.max_chunk_chars_per_language
+            .get(&language)
+            .copied()
+            .unwrap_or(self.max_chunk_chars)
     }
 }
 

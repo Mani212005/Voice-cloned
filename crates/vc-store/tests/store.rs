@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, VoiceId};
+use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, Rate, VoiceId};
 use vc_store::{ChunkRow, GENESIS_HASH, JobEnd, NewConsent, NewJob, Store, StoreError, VoiceRow};
 
 const TTL: i64 = 24 * 3600 * 1000;
@@ -47,6 +47,7 @@ fn job(store: &Store, voice: VoiceId, now: i64) -> JobId {
                 text: "secret text".into(),
                 text_sha256: "cd".repeat(32),
                 chunks_total: 2,
+                rate: Rate::NATIVE,
             },
             now,
         )
@@ -207,6 +208,7 @@ fn voice_in_use_cannot_be_deleted_and_deleted_voice_takes_no_jobs() {
         text: "x".into(),
         text_sha256: "00".repeat(32),
         chunks_total: 1,
+        rate: Rate::NATIVE,
     };
     assert!(matches!(s.insert_job(&new, 7), Err(StoreError::NotFound)));
 }
@@ -224,4 +226,78 @@ fn expiry_lists_only_ended_jobs_past_their_ttl() {
     assert!(!s.job_exists(done).unwrap());
     // A queued job can never be deleted through this path.
     assert!(s.delete_job(live).is_err());
+}
+
+#[test]
+fn a_job_keeps_its_rate() {
+    let s = Store::open_in_memory().unwrap();
+    let v = voice(&s);
+    let id = JobId::generate();
+    let rate = Rate::from_f64(1.2).unwrap();
+    s.insert_job(
+        &NewJob {
+            id,
+            voice_id: v,
+            language: Language::En,
+            text: "hi".into(),
+            text_sha256: "00".repeat(32),
+            chunks_total: 1,
+            rate,
+        },
+        1,
+    )
+    .unwrap();
+    assert_eq!(s.get_job(id).unwrap().rate, rate);
+    assert_eq!(s.jobs_in_state(JobState::Queued).unwrap()[0].rate, rate);
+}
+
+#[test]
+fn a_v1_database_is_migrated_and_its_jobs_keep_the_native_rate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vcd.sqlite3");
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(include_str!("../src/migrations/0001_init.sql"))
+            .unwrap();
+        c.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let s = Store::open(&path).unwrap();
+    let v = voice(&s);
+    let j = job(&s, v, 1);
+    assert_eq!(s.get_job(j).unwrap().rate, Rate::NATIVE);
+    drop(s);
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        // A v1 job row (no rate given) reads back at the native rate.
+        c.execute(
+            "INSERT INTO jobs (id, voice_id, state, language, text, text_sha256, chunks_total,
+                               created_at_ms)
+             VALUES (?1, ?2, 'queued', 'en', 'x', ?3, 1, 1)",
+            rusqlite::params![
+                JobId::generate().to_string(),
+                v.to_string(),
+                "00".repeat(32)
+            ],
+        )
+        .unwrap();
+        // The schema refuses rates outside the accepted range.
+        assert!(
+            c.execute(
+                "UPDATE jobs SET rate_milli = 2500 WHERE id = ?1",
+                [j.to_string()]
+            )
+            .is_err()
+        );
+    }
+    let s = Store::open(&path).unwrap();
+    assert!(
+        s.jobs_in_state(JobState::Queued)
+            .unwrap()
+            .iter()
+            .all(|r| r.rate == Rate::NATIVE)
+    );
 }

@@ -6,9 +6,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, VoiceId};
+use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, Rate, VoiceId};
 
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_job_rate.sql"),
+];
 /// `prev_hash` of the first consent record.
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -84,6 +87,7 @@ pub struct NewJob {
     pub text: String,
     pub text_sha256: String,
     pub chunks_total: usize,
+    pub rate: Rate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +110,7 @@ pub struct JobRow {
     pub first_audio_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
     pub expires_at_ms: Option<i64>,
+    pub rate: Rate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -412,8 +417,8 @@ impl Store {
         }
         tx.execute(
             "INSERT INTO jobs (id, voice_id, state, language, text, text_sha256, chunks_total,
-                               created_at_ms)
-             VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7)",
+                               created_at_ms, rate_milli)
+             VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 j.id.to_string(),
                 j.voice_id.to_string(),
@@ -422,6 +427,7 @@ impl Store {
                 j.text_sha256,
                 j.chunks_total,
                 now_ms,
+                j.rate.milli(),
             ],
         )?;
         tx.commit()?;
@@ -430,7 +436,7 @@ impl Store {
 
     const JOB_COLS: &'static str = "id, voice_id, state, language, text, text_sha256, \
         chunks_total, chunks_done, attempts, error_code, audio_ms, output_sha256, \
-        created_at_ms, started_at_ms, first_audio_at_ms, finished_at_ms, expires_at_ms";
+        created_at_ms, started_at_ms, first_audio_at_ms, finished_at_ms, expires_at_ms, rate_milli";
 
     fn job_from_row(r: &Row<'_>) -> rusqlite::Result<JobRow> {
         let error_code: Option<String> = r.get(9)?;
@@ -452,6 +458,13 @@ impl Store {
             first_audio_at_ms: r.get(14)?,
             finished_at_ms: r.get(15)?,
             expires_at_ms: r.get(16)?,
+            rate: Rate::from_milli(r.get(17)?).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    rusqlite::types::Type::Integer,
+                    Box::new(e),
+                )
+            })?,
         })
     }
 

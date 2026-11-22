@@ -56,11 +56,12 @@ async fn run(
         .map_err(|e| internal("load voice", &e))?;
     let text = job.text.ok_or_else(|| internal("job text", &"missing"))?;
     let caps = ctx.backend.capabilities();
-    let plan = vc_text::plan(
+    let plan = vc_text::plan_speech(
         &text,
+        job.language,
         PlanLimits {
             max_words: caps.max_chunk_words_for(job.language),
-            max_chars: caps.max_chunk_chars,
+            max_chars: caps.max_chunk_chars_for(job.language),
         },
     )
     .map_err(|_| ErrorCode::UnsplittableText)?;
@@ -110,14 +111,24 @@ async fn run(
         if cancel.is_cancelled() {
             return Ok(RunResult::Cancelled);
         }
-        let wav = vc_audio::encode_wav_bytes(&out.pcm).map_err(|e| internal("encode chunk", &e))?;
+        let pcm = if job.rate.is_native() {
+            out.pcm
+        } else {
+            let rate = job.rate.as_f64();
+            let raw = out.pcm;
+            tokio::task::spawn_blocking(move || vc_audio::time_stretch(&raw, rate))
+                .await
+                .map_err(|e| internal("time-stretch task", &e))?
+                .map_err(|e| internal("time-stretch chunk", &e))?
+        };
+        let wav = vc_audio::encode_wav_bytes(&pcm).map_err(|e| internal("encode chunk", &e))?;
         let path = ctx.data.chunk_path(job_id, chunk.idx);
         vc_store::files::write_private(&path, &wav).map_err(|e| internal("write chunk", &e))?;
         let row = ChunkRow {
             idx: chunk.idx,
             words: chunk.words,
             chars: chunk.chars,
-            audio_ms: out.pcm.duration_ms(),
+            audio_ms: pcm.duration_ms(),
             peak_rss_kib: out.stats.peak_rss_kib,
             wall_ms: u64::try_from(out.stats.wall.as_millis()).unwrap_or(u64::MAX),
             out_sha256: hex::encode(Sha256::digest(&wav)),
@@ -138,11 +149,13 @@ async fn run(
             job: job_id,
             idx: chunk.idx,
         });
-        outputs.push(out.pcm);
+        outputs.push(pcm);
     }
 
-    let joined = vc_audio::concat_with_gap(&outputs, ctx.config.inter_chunk_gap_ms)
-        .map_err(|_| ErrorCode::EngineOutputInvalid)?;
+    // The pause between chunks scales with the rate, like the speech around it.
+    let gap_ms = (f64::from(ctx.config.inter_chunk_gap_ms) / job.rate.as_f64()).round() as u32;
+    let joined =
+        vc_audio::concat_with_gap(&outputs, gap_ms).map_err(|_| ErrorCode::EngineOutputInvalid)?;
     let wav = vc_audio::encode_wav_bytes(&joined).map_err(|e| internal("encode output", &e))?;
     vc_store::files::write_private(&ctx.data.output_path(job_id), &wav)
         .map_err(|e| internal("write output", &e))?;

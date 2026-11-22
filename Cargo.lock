@@ -1547,6 +1547,7 @@ dependencies = [
  "proptest",
  "thiserror",
  "unicode-normalization",
+ "vc-core",
 ]
 
 [[package]]

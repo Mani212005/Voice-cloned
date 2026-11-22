@@ -532,6 +532,7 @@ async fn a_job_runs_to_a_downloadable_wav() {
     assert_eq!(j["chunks_done"], 2);
     assert_eq!(j["chunks"].as_array().unwrap().len(), 2);
     assert_eq!(j["language"], "hi");
+    assert_eq!(j["rate"], 1.0);
     assert!(j["timings"]["first_audio_ms"].is_i64());
     assert!(j["timings"]["run_ms"].is_i64());
     assert_eq!(j["provenance"]["backend_id"], "fake");
@@ -559,6 +560,31 @@ async fn a_job_runs_to_a_downloadable_wav() {
         StatusCode::NOT_FOUND
     );
     assert!(!api.data.job_dir(job.parse().unwrap()).exists());
+}
+
+#[tokio::test]
+async fn a_job_at_a_faster_rate_is_shorter_and_says_so() {
+    let api = Api::fake();
+    let voice = api.voice().await;
+    let mut events = api.engine.subscribe();
+    let text = "One two three four five six seven eight.";
+    let mut lengths = Vec::new();
+    for rate in [1.0, 1.25] {
+        let r = api
+            .post_json(
+                "/v1/jobs",
+                json!({ "voice_id": voice, "language": "en", "text": text, "rate": rate }),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::ACCEPTED);
+        assert_eq!(r.json()["rate"], rate);
+        let job = r.json()["id"].as_str().unwrap().to_owned();
+        api.wait_finished(&mut events, &job).await;
+        let a = api.get(&format!("/v1/jobs/{job}/audio")).await;
+        let pcm = vc_audio::decode_wav(std::io::Cursor::new(a.body)).unwrap();
+        lengths.push(pcm.samples.len());
+    }
+    assert_eq!(lengths[1], (lengths[0] as f64 / 1.25).round() as usize);
 }
 
 #[tokio::test]
@@ -605,6 +631,16 @@ async fn job_validation() {
         ),
         (
             json!({"voice_id": voice, "language": "en", "text": "hi", "seed": 42}),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        ),
+        (
+            json!({"voice_id": voice, "language": "en", "text": "hi", "rate": 2.0}),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        ),
+        (
+            json!({"voice_id": voice, "language": "en", "text": "hi", "rate": 0.7}),
             StatusCode::BAD_REQUEST,
             "invalid_request",
         ),
