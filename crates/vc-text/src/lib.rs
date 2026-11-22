@@ -2,17 +2,19 @@
 //!
 //! The engine is run once per chunk. The first sentence is a chunk of its own, so audio
 //! starts sooner. A chunk is at most `max_words` words and `max_chars` characters (for the
-//! turbo2 recipe 15 and 85 in English, 14 and 200 in Hindi, measured to stay within the
-//! 1.1 GB engine budget). Chunks are cut at sentence boundaries first, then at clause punctuation,
-//! then between words. English text is first rewritten into its spoken form ([`speakable`]),
-//! so the caps apply to the words the engine actually says. Pure functions only.
+//! turbo2 recipe 13 and 85 in English, 12 and 55 in Hindi, measured to stay within the
+//! 1.1 GB engine budget). Chunks are cut at sentence boundaries first, then at clause
+//! punctuation, then between words. English text is first rewritten into its spoken form
+//! ([`speakable`]), so the caps apply to the words the engine actually says. Hindi is given
+//! to the engine as written, so its digits and acronym letters count as several characters
+//! ([`CharWeights`]). Pure functions only.
 
 mod normalize;
 mod plan;
 mod speak;
 
 pub use normalize::normalize;
-pub use plan::{Chunk, ChunkPlan, PlanError, PlanLimits, plan};
+pub use plan::{CharWeights, Chunk, ChunkPlan, PlanError, PlanLimits, plan, weighted_chars};
 use vc_core::Language;
 
 /// The text the engine is given for `language`: English is rewritten into its spoken form

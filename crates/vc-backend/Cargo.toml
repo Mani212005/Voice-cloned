@@ -27,6 +27,7 @@ toml = "1.2.1"
 tracing = "0.1.44"
 vc-audio = { version = "0.1.0", path = "../vc-audio" }
 vc-core = { version = "0.1.0", path = "../vc-core" }
+vc-text = { version = "0.1.0", path = "../vc-text" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

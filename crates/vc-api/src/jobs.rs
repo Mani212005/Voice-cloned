@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use vc_core::{ErrorCode, JobId, JobState, Language, Rate, VoiceId};
 use vc_engine::{CancelOutcome, EnqueueError, QueueStatus};
 use vc_store::{JobRow, NewJob, StoreError};
-use vc_text::{PlanError, PlanLimits};
+use vc_text::PlanError;
 
 use crate::views::JobView;
 use crate::{AppState, Problem, State, parse_id, rejection, store_err};
@@ -77,19 +77,16 @@ pub async fn create(
             ),
         ));
     }
-    let plan = vc_text::plan_speech(
-        &req.text,
-        language,
-        PlanLimits {
-            max_words: caps.max_chunk_words_for(language),
-            max_chars: caps.max_chunk_chars_for(language),
-        },
-    )
-    .map_err(|e| match e {
-        PlanError::Empty => Problem::invalid("text is empty"),
-        PlanError::Unsplittable { .. } => Problem::new(ErrorCode::UnsplittableText, e.to_string()),
-        PlanError::InvalidLimits => Problem::internal(),
-    })?;
+    let plan =
+        vc_text::plan_speech(&req.text, language, caps.plan_limits_for(language)).map_err(|e| {
+            match e {
+                PlanError::Empty => Problem::invalid("text is empty"),
+                PlanError::Unsplittable { .. } => {
+                    Problem::new(ErrorCode::UnsplittableText, e.to_string())
+                }
+                PlanError::InvalidLimits => Problem::internal(),
+            }
+        })?;
 
     let job = NewJob {
         id: JobId::generate(),

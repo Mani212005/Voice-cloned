@@ -76,6 +76,23 @@ pub struct EngineSettings {
     pub env: BTreeMap<String, String>,
 }
 
+/// See [`vc_text::CharWeights`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharWeights {
+    pub digit: usize,
+    pub acronym_letter: usize,
+}
+
+impl From<CharWeights> for vc_text::CharWeights {
+    fn from(w: CharWeights) -> Self {
+        Self {
+            digit: w.digit,
+            acronym_letter: w.acronym_letter,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budget {
@@ -91,6 +108,10 @@ pub struct Budget {
     /// `max_chunk_chars` allows within the budget.
     #[serde(default)]
     pub max_chunk_chars_per_language: BTreeMap<Language, usize>,
+    /// How many characters a digit or an acronym letter counts as against the character
+    /// cap, for languages whose text the engine reads as written. Others count each once.
+    #[serde(default)]
+    pub char_weights_per_language: BTreeMap<Language, CharWeights>,
     /// A warm engine is restarted before a chunk when its peak RSS so far plus this
     /// would cross `ram_budget_kib`.
     pub restart_headroom_kib: u64,
@@ -266,6 +287,14 @@ impl RecipeManifest {
                 "per-language character caps must be positive and at most max_chunk_chars",
             );
         }
+        if self
+            .budget
+            .char_weights_per_language
+            .values()
+            .any(|w| w.digit == 0 || w.acronym_letter == 0)
+        {
+            return invalid("character weights must be positive");
+        }
         let host_limits =
             std::iter::once((self.budget.ram_budget_kib, self.budget.restart_headroom_kib)).chain(
                 self.budget
@@ -423,12 +452,22 @@ mod tests {
         assert_eq!(m.budget.max_chunk_words, 19);
         assert_eq!(
             m.budget.max_chunk_words_per_language,
-            BTreeMap::from([(Language::En, 15), (Language::Hi, 14)])
+            BTreeMap::from([(Language::En, 13), (Language::Hi, 12)])
         );
         assert_eq!(m.budget.max_chunk_chars, 200);
         assert_eq!(
             m.budget.max_chunk_chars_per_language,
-            BTreeMap::from([(Language::En, 85)])
+            BTreeMap::from([(Language::En, 85), (Language::Hi, 55)])
+        );
+        assert_eq!(
+            m.budget.char_weights_per_language,
+            BTreeMap::from([(
+                Language::Hi,
+                CharWeights {
+                    digit: 5,
+                    acronym_letter: 3
+                }
+            )])
         );
         assert_eq!(m.budget.ram_budget_kib, 1_100_000);
         assert_eq!(m.budget.restart_headroom_kib, 100_000);
@@ -498,6 +537,17 @@ mod tests {
         assert!(RecipeManifest::parse(&bad_hash).is_err());
         let unknown = format!("{good}\n[extra]\nx = 1\n");
         assert!(RecipeManifest::parse(&unknown).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_character_weights() {
+        let good = TURBO2_MANIFEST;
+        let zero = good.replace(
+            "{ hi = { digit = 5, acronym_letter = 3 } }",
+            "{ hi = { digit = 0, acronym_letter = 3 } }",
+        );
+        assert_ne!(zero, good);
+        assert!(RecipeManifest::parse(&zero).is_err());
     }
 
     #[test]

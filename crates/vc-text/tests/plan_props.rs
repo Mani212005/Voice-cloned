@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
-use vc_text::{PlanError, PlanLimits, normalize, plan};
+use vc_text::{CharWeights, PlanError, PlanLimits, normalize, plan, weighted_chars};
 
 fn config() -> Config {
     Config {
@@ -25,6 +25,7 @@ fn word() -> impl Strategy<Value = String> {
         "[a-z]{1,6}[.,?!;:]",
         "[\u{0915}-\u{0939}]{1,5}\u{0964}",
         "[0-9]{1,3}\\.[0-9]{1,2}",
+        "[A-Z]{2,4}s?[,.]?",
     ]
 }
 
@@ -48,10 +49,16 @@ fn text() -> impl Strategy<Value = String> {
 }
 
 fn limits() -> impl Strategy<Value = PlanLimits> {
-    (1usize..30, 12usize..250).prop_map(|(max_words, max_chars)| PlanLimits {
-        max_words,
-        max_chars,
-    })
+    (1usize..30, 12usize..250, 1usize..6, 1usize..4).prop_map(
+        |(max_words, max_chars, digit, acronym_letter)| PlanLimits {
+            max_words,
+            max_chars,
+            weights: CharWeights {
+                digit,
+                acronym_letter,
+            },
+        },
+    )
 }
 
 proptest! {
@@ -65,7 +72,7 @@ proptest! {
                 for (i, c) in p.chunks.iter().enumerate() {
                     prop_assert_eq!(c.idx, i);
                     prop_assert!(c.words >= 1 && c.words <= l.max_words);
-                    prop_assert!(c.chars <= l.max_chars);
+                    prop_assert!(weighted_chars(&c.text, l.weights) <= l.max_chars);
                     prop_assert_eq!(c.words, c.text.split(' ').count());
                     prop_assert_eq!(c.chars, c.text.chars().count());
                     prop_assert_eq!(c.text.trim(), c.text.as_str());
@@ -77,7 +84,7 @@ proptest! {
                 prop_assert_eq!(max_chars, l.max_chars);
                 let longest = normalize(&t)
                     .split_whitespace()
-                    .map(|w| w.chars().count())
+                    .map(|w| weighted_chars(w, l.weights))
                     .max()
                     .unwrap_or(0);
                 prop_assert!(longest > l.max_chars);
@@ -122,7 +129,7 @@ proptest! {
     fn a_chunk_ends_at_a_boundary_unless_forced(t in text()) {
         // With a generous char cap, a chunk that does not end at a sentence or clause mark
         // or a line end must have been cut at the word cap, so it is exactly full.
-        let l = PlanLimits { max_words: 19, max_chars: 10_000 };
+        let l = PlanLimits::new(19, 10_000);
         let p = plan(&t, l).unwrap();
         let normalized = normalize(&t);
         let line_ends: std::collections::HashSet<&str> =
