@@ -80,10 +80,10 @@ naturalness (UTMOS) of the same sentences from 3.68 to 4.20, more than any model
 sampler setting.
 
 Upgrading: the database migrates itself (schema v2 adds the job rate; an older vcd
-refuses the newer database). The chunk plan of English text with numbers, acronyms, symbols or abbreviations
-differs from the previous release's, so such a job still queued or running at upgrade
-fails with "chunk plan changed since the job was accepted" and must be resubmitted;
-restart the service when idle.
+refuses the newer database). The chunk plan of English text with numbers, acronyms,
+symbols or abbreviations differs from the previous release's, so such a job still queued
+or running at upgrade fails with "chunk plan changed since the job was accepted" and must
+be resubmitted; restart the service when idle.
 
 ```sh
 cargo xtask fetch-models          # model files + engine runtime into models/ (gitignored), verified
@@ -125,10 +125,10 @@ in an owner-only data directory. The engine runs with a cleared environment and 
 private HOME, cache and TMPDIR per job. Nothing is sent off the machine. Never commit
 references, outputs or recordings; tests use synthetic audio only.
 
-Workspace: `crates/vc-core` (ids, job states, error codes), `vc-text` (spoken form, chunk planner),
-`vc-audio` (WAV, time-stretch), `vc-backend` (`Backend` trait, `CrispWarmBackend` and its restart
-policy, `CrispCliBackend`, fakes, process control), `vc-store` (SQLite + data dir),
-`vc-engine` (scheduler: one engine slot, queue, cancel, recovery, retention), `vc-api`
+Workspace: `crates/vc-core` (ids, job states, rate, error codes), `vc-text` (spoken form,
+chunk planner), `vc-audio` (WAV, time-stretch), `vc-backend` (`Backend` trait,
+`CrispWarmBackend` and its restart policy, `CrispCliBackend`, fakes, process control),
+`vc-store` (SQLite + data dir), `vc-engine` (scheduler: one engine slot, queue, cancel, recovery, retention), `vc-api`
 (axum routes), `vcd` (the binary), `xtask`.
 
 Not in v1 yet: encryption at rest and crypto-erase, server-sent progress events and
