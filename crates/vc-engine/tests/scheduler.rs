@@ -60,7 +60,21 @@ impl Fx {
 
     /// Enroll another voice; it is the newest one.
     fn add_voice(&self, reference_language: Language) -> VoiceId {
-        let voice = VoiceId::generate();
+        // Ids sort by creation time only across milliseconds; wait out the
+        // current one so this voice is strictly the newest, as in production.
+        let newest_so_far = self
+            .store
+            .list_voices()
+            .unwrap()
+            .last()
+            .map(|v| v.id.to_string());
+        let voice = loop {
+            let id = VoiceId::generate();
+            if newest_so_far.as_ref().is_none_or(|n| id.to_string() > *n) {
+                break id;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
         vc_store::files::private_dir(&self.data.voice_dir(voice)).unwrap();
         vc_store::files::write_private(
             &self.data.reference_path(voice),
