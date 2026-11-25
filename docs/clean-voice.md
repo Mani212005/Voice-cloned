@@ -147,6 +147,7 @@ Reference cleanup (on the laptop reference):
 | RNNoise, then +6 dB shelf | 4.05 | 3.45 | 9.57 | -76.2 | 41.0 | -22.0 | 0.800 |
 | DeepFilterNet3, then +6 dB shelf | 3.97 | 3.39 | 9.63 | -76.2 | 41.5 | -22.3 | 0.802 |
 | **shipped: high-pass, RNNoise capped at 18 dB, adaptive shelf (+5.8 dB)** | **4.03** | **3.32** | 9.49 | -73.6 | 36.3 | **-20.9** | 0.810 |
+| shipped, RNNoise capped at 30 dB | 3.96 | 3.19 | 9.48 | -74.2 | 38.4 | -21.1 | 0.808 |
 
 (Likeness: Resemblyzer cosine against 30 held-out clean clips of the owner. Brightness:
 energy above 4 kHz relative to the total, dB.)
@@ -157,8 +158,16 @@ energy above 4 kHz relative to the total, dB.)
   (+7-10 dB SNR) and Hindi gains up to +0.14 UTMOS.
 - Brightening alone makes the clone hiss (pause floor up 7 dB, 4-8 kHz SNR down): the
   reference's noise must go first. Denoise then brighten is the best combination
-  measured: +0.11 UTMOS in English and +0.18 in Hindi, with the hiss 12 dB lower.
+  measured on these 8 sentences: +0.11 UTMOS in English and +0.18 in Hindi, with the hiss
+  12 dB lower.
 - Likeness to the owner's real voice is unchanged (0.80-0.81 throughout).
+- On 4 more English and 4 more Hindi sentences the picture held for noise and tone (the
+  shipped cleanup: 4-8 kHz SNR 25.5 to 34.2 dB, pause floor -68.6 to -72.5 dBFS, 3 dB
+  brighter) while UTMOS moved within its spread (English 4.03 to 3.90, Hindi 3.28 to
+  3.38). Over all 10 English and 6 Hindi sentences: as enrolled 3.98 / 3.28, shipped
+  cleanup 3.98 / 3.36, the same with an RNNoise cap of 30 dB 3.99 / 3.33. The cap makes
+  no measurable difference, so the safer 18 dB stays. English WER is 0/93 before and
+  after; Hindi CER 40/171 and 42/171, both from one sentence the engine finds hard.
 - No option made the voice thin or metallic by the numbers (HNR never fell, UTMOS never
   dropped beyond run-to-run spread). The cap on RNNoise and the never-cut shelf keep the
   worst case mild by construction.
@@ -181,10 +190,36 @@ Output polish (on clones of the laptop reference, loudness-matched UTMOS):
   spread and make the voice as loud as other voice audio, which is most of what makes a
   voice "pop".
 
+### End to end through vcd
+
+The real service on its own port and a copy of the owner's data (database migrated from
+v2, the old voice reads `reference_cleaned: false`), the laptop reference enrolled again
+with the default cleanup (0.8 s), then one job after another on a warm engine:
+
+| Job | Chunks | Peak RSS (worst chunk) | Audio |
+|---|---|---|---|
+| English paragraph, old voice, no polish | 5 | 1.013 GB | 13.64 s |
+| same, cleaned voice, polish | 5 | 1.014 GB | 13.88 s |
+| same at rate 1.2 | 5 | 1.017 GB | 11.57 s |
+| Hindi, old voice, no polish | 2 | 1.009 GB | 6.96 s |
+| Hindi, cleaned voice, polish | 2 | 0.994 GB | 6.04 s |
+| same at rate 1.2 | 2 | 1.001 GB | 5.03 s |
+
+Every chunk stays under the 1.1 GB budget; the cleanup does not change the engine's
+memory (the reference is the same length) and the polish runs in `vcd`. The two English
+paragraphs, before and after, measure: UTMOS 3.74 and 3.92 (loudness-matched), HNR 9.07
+and 9.46 dB, 4-8 kHz SNR 36.1 and 45.6 dB, energy above 4 kHz -27.4 and -22.1 dB, loudness
+-22.9 and -16.3 LUFS, likeness 0.811 and 0.825, ASR errors 0/42 words in both. The Hindi
+pair: UTMOS 3.38 and 3.84, CER 16/56 and 15/56. These are single renditions: the cleaner reference also changes timing and
+intonation a little, so a single pair can swing more than the averages above. A blind A/B
+pair of these two clips is kept on the owner's machine for a listening verdict, which
+no number here replaces.
+
 ### Defaults and why
 
-- **Reference cleanup on.** It helped every measure that matters and hurt none, and a
-  clean recording passes through nearly untouched (synthetic test: SI-SDR 15.5 dB against
+- **Reference cleanup on.** It lowered the hiss and restored the top end in every test,
+  held naturalness, intelligibility and likeness, and a clean recording passes through
+  nearly untouched (synthetic test: SI-SDR 15.5 dB against
   the high-passed input, level within 0.2 dB). It changes only new enrollments.
 - **Output polish on.** Neutral for naturalness, louder and more consistent output.
   Anyone who masters the audio themselves can send `"polish": false` or switch it off.

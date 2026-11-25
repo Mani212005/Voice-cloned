@@ -53,11 +53,24 @@ pub fn polish(pcm: &MonoPcm, p: &PolishParams) -> MonoPcm {
     if p.deess_max_db > 0.0 && p.deess_hz < rate / 2.0 * 0.9 {
         deess(&mut x, rate, p);
     }
-    if let Some(l) = integrated_loudness(&x, pcm.sample_rate) {
-        let g = 10f64.powf((p.target_lufs - l).min(p.max_gain_db) / 20.0);
+    let ceiling = 10f64.powf(p.ceiling_dbfs / 20.0);
+    let mut applied_db = 0.0;
+    // The limiter takes a little loudness off the peaks it catches; a second, smaller
+    // gain step makes that up (within the gain cap), and the limiter runs again.
+    for _ in 0..2 {
+        let Some(l) = integrated_loudness(&x, pcm.sample_rate) else {
+            break;
+        };
+        let step = (p.target_lufs - l).min(p.max_gain_db - applied_db);
+        if step.abs() < 0.05 {
+            break;
+        }
+        applied_db += step;
+        let g = 10f64.powf(step / 20.0);
         x.iter_mut().for_each(|v| *v *= g);
+        limit(&mut x, rate, ceiling);
     }
-    limit(&mut x, rate, 10f64.powf(p.ceiling_dbfs / 20.0));
+    limit(&mut x, rate, ceiling);
     MonoPcm {
         sample_rate: pcm.sample_rate,
         samples: x
@@ -185,7 +198,7 @@ mod tests {
                 let out = polish(&pcm(rate, &voice(rate, 4.0, amp)), &p);
                 let y = as_f64(&out);
                 let l = integrated_loudness(&y, rate).unwrap();
-                assert!((l - p.target_lufs).abs() < 1.0, "{rate} {amp}: {l} LUFS");
+                assert!((l - p.target_lufs).abs() < 0.3, "{rate} {amp}: {l} LUFS");
                 let peak = y.iter().fold(0.0f64, |m, v| m.max(v.abs()));
                 assert!(
                     20.0 * peak.log10() <= p.ceiling_dbfs + 0.01,

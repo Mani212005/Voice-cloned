@@ -85,9 +85,9 @@ sampler setting.
 The clone copies its reference's background hiss and its muffled or bright tone, so
 `vcd` cleans each new reference at enrollment: RNNoise (pure Rust, weights compiled in)
 capped at 18 dB of reduction, then a high shelf that restores a muffled top end and
-never cuts. On the owner's laptop reference this raised the clone's UTMOS from 3.94 to
-4.03 in English, cut the 4-8 kHz hiss by 7 dB and restored 5 dB of top end, with
-likeness unchanged. Every job's output is then finished with a de-esser, loudness
+never cuts. On the owner's laptop reference this cut the clone's 4-8 kHz hiss by 7-10 dB
+and gave back about 5 dB of top end; predicted naturalness (UTMOS) held in English and
+rose in Hindi, and likeness was unchanged. Every job's output is then finished with a de-esser, loudness
 normalization to -16 LUFS and a -1 dBFS peak limiter. Both are on by default:
 `cleanup=false` on an upload or `"polish": false` on a job opts out, and
 `[audio] reference_cleanup` and `output_polish` in `vcd.toml` change the defaults.
