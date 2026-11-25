@@ -87,8 +87,8 @@ The clone copies its reference's background hiss and its muffled or bright tone,
 capped at 18 dB of reduction, then a high shelf that restores a muffled top end and
 never cuts. On the owner's laptop reference this cut the clone's 4-8 kHz hiss by 7-10 dB
 and gave back about 5 dB of top end; predicted naturalness (UTMOS) held in English and
-rose in Hindi, and likeness was unchanged. Every job's output is then finished with a de-esser, loudness
-normalization to -16 LUFS and a -1 dBFS peak limiter. Both are on by default:
+rose in Hindi, and likeness was unchanged. Every job's output is then finished with a
+de-esser, loudness normalization to -16 LUFS and a -1 dBFS peak limiter. Both are on by default:
 `cleanup=false` on an upload or `"polish": false` on a job opts out, and
 `[audio] reference_cleanup` and `output_polish` in `vcd.toml` change the defaults.
 Voices enrolled earlier are not changed; enroll the recording again to clean it. How to
@@ -141,14 +141,14 @@ Errors are `application/problem+json` with a stable `code`. Settings live in an 
 `vcd.toml` (`--config`); every key has a default.
 
 Privacy: only the normalized (and cleaned) reference is stored (the upload itself is not
-kept), job text is dropped when a job ends, outputs are deleted after 24 hours, and everything sits
-in an owner-only data directory. The engine runs with a cleared environment and a
+kept), job text is dropped when a job ends, outputs are deleted after 24 hours, and
+everything sits in an owner-only data directory. The engine runs with a cleared environment and a
 private HOME, cache and TMPDIR per job. Nothing is sent off the machine. Never commit
 references, outputs or recordings; tests use synthetic audio only.
 
 Workspace: `crates/vc-core` (ids, job states, rate, error codes), `vc-text` (spoken form,
-chunk planner), `vc-audio` (WAV, time-stretch, reference cleanup, output polish), `vc-backend` (`Backend` trait,
-`CrispWarmBackend` and its restart policy, `CrispCliBackend`, fakes, process control),
+chunk planner), `vc-audio` (WAV, time-stretch, reference cleanup, output polish),
+`vc-backend` (`Backend` trait, `CrispWarmBackend` and its restart policy, `CrispCliBackend`, fakes, process control),
 `vc-store` (SQLite + data dir), `vc-engine` (scheduler: one engine slot, queue, cancel,
 recovery, retention), `vc-api` (axum routes), `vcd` (the binary), `xtask`.
 
