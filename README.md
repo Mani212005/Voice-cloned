@@ -82,7 +82,21 @@ owner's voice, a reference picked this way from clean recordings raised the pred
 naturalness (UTMOS) of the same sentences from 3.68 to 4.20, more than any model or
 sampler setting.
 
-Upgrading: the database migrates itself (schema v2 adds the job rate; an older vcd
+The clone copies its reference's background hiss and its muffled or bright tone, so
+`vcd` cleans each new reference at enrollment: RNNoise (pure Rust, weights compiled in)
+capped at 18 dB of reduction, then a high shelf that restores a muffled top end and
+never cuts. On the owner's laptop reference this raised the clone's UTMOS from 3.94 to
+4.03 in English, cut the 4-8 kHz hiss by 7 dB and restored 5 dB of top end, with
+likeness unchanged. Every job's output is then finished with a de-esser, loudness
+normalization to -16 LUFS and a -1 dBFS peak limiter. Both are on by default:
+`cleanup=false` on an upload or `"polish": false` on a job opts out, and
+`[audio] reference_cleanup` and `output_polish` in `vcd.toml` change the defaults.
+Voices enrolled earlier are not changed; enroll the recording again to clean it. How to
+record a good reference, what each step does and the measurements behind it are in
+[`docs/clean-voice.md`](docs/clean-voice.md).
+
+Upgrading: the database migrates itself (schema v2 adds the job rate, v3 records
+whether a voice's reference was cleaned and whether a job is polished; an older vcd
 refuses the newer database). Run `cargo xtask fetch-models` again (on a Mac,
 `scripts/voice-clone-service install`): the S3Gen file is now
 `chatterbox-turbo-s3gen-q4_k-fd-q8_0.gguf`, built locally from two published files, and a
@@ -117,8 +131,8 @@ curl -s -X DELETE $B/v1/jobs/job_...           # cancel (kills the engine) or de
 |---|---|
 | `GET /v1/health`, `/v1/version`, `/v1/models` | liveness; backend, runtime pin, model hashes, consent chain head; capabilities |
 | `POST /v1/consents` | append-only, hash-chained consent records |
-| `POST/GET /v1/voices`, `GET/DELETE /v1/voices/{id}` | enroll one WAV reference, list, delete (409 while a job uses it) |
-| `POST /v1/jobs`, `GET/DELETE /v1/jobs/{id}`, `GET /v1/jobs/{id}/audio` | queue a job (202, 429 when the queue is full), progress, cancel or delete, the final WAV |
+| `POST/GET /v1/voices`, `GET/DELETE /v1/voices/{id}` | enroll one WAV reference (`cleanup=false` keeps it as recorded), list, delete (409 while a job uses it) |
+| `POST /v1/jobs`, `GET/DELETE /v1/jobs/{id}`, `GET /v1/jobs/{id}/audio` | queue a job (optional `rate`, `"polish": false`; 202, 429 when the queue is full), progress, cancel or delete, the final WAV |
 
 Requests whose `Host` is not `127.0.0.1`, `localhost` or `[::1]` are refused with a 400,
 which blocks DNS-rebinding pages from driving the loopback listener.
@@ -126,14 +140,14 @@ which blocks DNS-rebinding pages from driving the loopback listener.
 Errors are `application/problem+json` with a stable `code`. Settings live in an optional
 `vcd.toml` (`--config`); every key has a default.
 
-Privacy: only the normalized reference is stored (the upload itself is not kept), job
-text is dropped when a job ends, outputs are deleted after 24 hours, and everything sits
+Privacy: only the normalized (and cleaned) reference is stored (the upload itself is not
+kept), job text is dropped when a job ends, outputs are deleted after 24 hours, and everything sits
 in an owner-only data directory. The engine runs with a cleared environment and a
 private HOME, cache and TMPDIR per job. Nothing is sent off the machine. Never commit
 references, outputs or recordings; tests use synthetic audio only.
 
 Workspace: `crates/vc-core` (ids, job states, rate, error codes), `vc-text` (spoken form,
-chunk planner), `vc-audio` (WAV, time-stretch), `vc-backend` (`Backend` trait,
+chunk planner), `vc-audio` (WAV, time-stretch, reference cleanup, output polish), `vc-backend` (`Backend` trait,
 `CrispWarmBackend` and its restart policy, `CrispCliBackend`, fakes, process control),
 `vc-store` (SQLite + data dir), `vc-engine` (scheduler: one engine slot, queue, cancel,
 recovery, retention), `vc-api` (axum routes), `vcd` (the binary), `xtask`.

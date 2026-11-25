@@ -77,6 +77,7 @@ impl Fx {
                 ref_ms: 100,
                 ref_sha256: "00".repeat(32),
                 created_at_ms: self.clock.now_ms(),
+                ref_cleaned: false,
             })
             .unwrap();
         voice
@@ -110,6 +111,7 @@ impl Fx {
             text_sha256: "11".repeat(32),
             chunks_total: plan.chunks.len(),
             rate: Rate::NATIVE,
+            polish: false,
         }
     }
 }
@@ -247,6 +249,45 @@ async fn a_faster_rate_shortens_chunks_and_gaps_without_new_engine_text() {
     let row = fx.store.get_job(job.id).unwrap();
     assert_eq!(row.rate, rate);
     assert_eq!(row.audio_ms, Some(expected.duration_ms()));
+}
+
+#[tokio::test]
+async fn a_polished_job_is_the_polished_join_of_untouched_chunks() {
+    let fx = Fx::new();
+    let backend = Arc::new(FakeBackend::with_limits(2, 200));
+    let config = EngineConfig {
+        inter_chunk_gap_ms: 120,
+        ..EngineConfig::default()
+    };
+    let engine = Engine::start(fx.ctx(backend.clone(), config)).unwrap();
+    let mut events = engine.subscribe();
+    let text = "aap kaise hain? main theek hoon.";
+    let plain = fx.new_job(text, Language::Hi, 2);
+    let polished = NewJob {
+        polish: true,
+        ..fx.new_job(text, Language::Hi, 2)
+    };
+    for job in [&plain, &polished] {
+        engine.enqueue(job.clone()).await.unwrap();
+        assert_eq!(finished(&mut events, job.id).await, JobState::Succeeded);
+    }
+    let chunks: Vec<MonoPcm> = ["aap kaise", "hain?", "main theek", "hoon."]
+        .iter()
+        .map(|t| fake_pcm(t))
+        .collect();
+    let joined = vc_audio::concat_with_gap(&chunks, 120).unwrap();
+    for (i, want) in chunks.iter().enumerate() {
+        let chunk = vc_audio::read_wav_file(&fx.data.chunk_path(polished.id, i)).unwrap();
+        assert_eq!(&chunk, want, "chunk files stay as the engine made them");
+    }
+    let out = |id| vc_audio::read_wav_file(&fx.data.output_path(id)).unwrap();
+    assert_eq!(out(plain.id), joined, "no polish leaves the join untouched");
+    let want = vc_audio::polish(&joined, &vc_audio::PolishParams::default());
+    assert_ne!(want, joined);
+    assert_eq!(out(polished.id), want);
+    let row = fx.store.get_job(polished.id).unwrap();
+    assert!(row.polish);
+    assert_eq!(row.audio_ms, Some(want.duration_ms()));
 }
 
 #[tokio::test]

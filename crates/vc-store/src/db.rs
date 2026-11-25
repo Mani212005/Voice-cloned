@@ -11,6 +11,7 @@ use vc_core::{ConsentId, ErrorCode, JobId, JobState, Language, Rate, VoiceId};
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_job_rate.sql"),
+    include_str!("migrations/0003_clean_voice.sql"),
 ];
 /// `prev_hash` of the first consent record.
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -77,6 +78,8 @@ pub struct VoiceRow {
     pub ref_ms: u64,
     pub ref_sha256: String,
     pub created_at_ms: i64,
+    /// The stored reference went through the enrollment cleanup.
+    pub ref_cleaned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +91,8 @@ pub struct NewJob {
     pub text_sha256: String,
     pub chunks_total: usize,
     pub rate: Rate,
+    /// Run the finishing polish on the joined output.
+    pub polish: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +116,7 @@ pub struct JobRow {
     pub finished_at_ms: Option<i64>,
     pub expires_at_ms: Option<i64>,
     pub rate: Rate,
+    pub polish: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -321,8 +327,8 @@ impl Store {
     pub fn insert_voice(&self, v: &VoiceRow) -> Result<()> {
         self.conn().execute(
             "INSERT INTO voices (id, consent_id, name, reference_language, ref_sample_rate,
-                                 ref_ms, ref_sha256, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                 ref_ms, ref_sha256, created_at_ms, ref_cleaned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 v.id.to_string(),
                 v.consent_id.to_string(),
@@ -332,6 +338,7 @@ impl Store {
                 to_i64(v.ref_ms),
                 v.ref_sha256,
                 v.created_at_ms,
+                v.ref_cleaned,
             ],
         )?;
         Ok(())
@@ -347,11 +354,12 @@ impl Store {
             ref_ms: to_u64(r.get(5)?),
             ref_sha256: r.get(6)?,
             created_at_ms: r.get(7)?,
+            ref_cleaned: r.get(8)?,
         })
     }
 
     const VOICE_COLS: &'static str = "id, consent_id, name, reference_language, ref_sample_rate, \
-                                      ref_ms, ref_sha256, created_at_ms";
+                                      ref_ms, ref_sha256, created_at_ms, ref_cleaned";
 
     /// A live (not deleted) voice.
     pub fn get_voice(&self, id: VoiceId) -> Result<VoiceRow> {
@@ -417,8 +425,8 @@ impl Store {
         }
         tx.execute(
             "INSERT INTO jobs (id, voice_id, state, language, text, text_sha256, chunks_total,
-                               created_at_ms, rate_milli)
-             VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8)",
+                               created_at_ms, rate_milli, polish)
+             VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 j.id.to_string(),
                 j.voice_id.to_string(),
@@ -428,6 +436,7 @@ impl Store {
                 j.chunks_total,
                 now_ms,
                 j.rate.milli(),
+                j.polish,
             ],
         )?;
         tx.commit()?;
@@ -436,7 +445,8 @@ impl Store {
 
     const JOB_COLS: &'static str = "id, voice_id, state, language, text, text_sha256, \
         chunks_total, chunks_done, attempts, error_code, audio_ms, output_sha256, \
-        created_at_ms, started_at_ms, first_audio_at_ms, finished_at_ms, expires_at_ms, rate_milli";
+        created_at_ms, started_at_ms, first_audio_at_ms, finished_at_ms, expires_at_ms, rate_milli, \
+        polish";
 
     fn job_from_row(r: &Row<'_>) -> rusqlite::Result<JobRow> {
         let error_code: Option<String> = r.get(9)?;
@@ -465,6 +475,7 @@ impl Store {
                     Box::new(e),
                 )
             })?,
+            polish: r.get(18)?,
         })
     }
 

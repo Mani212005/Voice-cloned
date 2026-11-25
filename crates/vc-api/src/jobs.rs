@@ -25,6 +25,10 @@ pub struct CreateJob {
     /// Applied as a pitch-preserving time-stretch of the synthesized audio.
     #[serde(default)]
     pub rate: Option<f64>,
+    /// Finish the output with the polish chain (de-esser, loudness normalization to
+    /// -16 LUFS, peak limiter). Default: the service's `audio.output_polish`.
+    #[serde(default)]
+    pub polish: Option<bool>,
 }
 
 async fn view(state: &AppState, job: &JobRow) -> Result<Value, Problem> {
@@ -96,6 +100,7 @@ pub async fn create(
         text: req.text,
         chunks_total: plan.chunks.len(),
         rate,
+        polish: req.polish.unwrap_or(state.config.output_polish),
     };
     let id = job.id;
     match state.engine.enqueue(job).await {

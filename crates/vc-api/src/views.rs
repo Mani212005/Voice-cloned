@@ -26,6 +26,8 @@ pub struct VoiceView {
     pub reference_seconds: f64,
     pub reference_sample_rate_hz: u32,
     pub reference_sha256: String,
+    /// The stored reference went through the enrollment cleanup.
+    pub reference_cleaned: bool,
     pub created_at: String,
 }
 
@@ -39,6 +41,7 @@ impl From<VoiceRow> for VoiceView {
             reference_seconds: v.ref_ms as f64 / 1000.0,
             reference_sample_rate_hz: v.ref_sample_rate,
             reference_sha256: v.ref_sha256,
+            reference_cleaned: v.ref_cleaned,
             created_at: rfc3339(v.created_at_ms),
         }
     }
@@ -70,6 +73,8 @@ pub struct JobView<'a> {
     pub language: Language,
     /// Speaking rate the audio is delivered at (1.0 is the engine's own pace).
     pub rate: Rate,
+    /// The output is finished with the polish chain.
+    pub polish: bool,
     /// 1-based position in the queue while queued.
     pub queue_position: Option<usize>,
     pub chunks_total: usize,
@@ -102,6 +107,7 @@ impl<'a> JobView<'a> {
             state: job.state,
             language: job.language,
             rate: job.rate,
+            polish: job.polish,
             queue_position,
             chunks_total: job.chunks_total,
             chunks_done: job.chunks_done,

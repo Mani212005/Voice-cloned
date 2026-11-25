@@ -755,3 +755,185 @@ async fn oversized_bodies_are_refused() {
         (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large".into())
     );
 }
+
+/// A synthetic noisy reference: 0.3 s tone bursts with 0.2 s pauses, under seeded white
+/// noise. Returns the WAV and a mask of the pause samples (away from the burst edges).
+fn noisy_wav(rate: u32, seconds: f64) -> (Vec<u8>, Vec<bool>) {
+    let n = (f64::from(rate) * seconds) as usize;
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut noise = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    };
+    let mut pause = vec![false; n];
+    let samples = (0..n)
+        .map(|i| {
+            let t = i as f64 / f64::from(rate);
+            let phase = t % 0.5;
+            pause[i] = phase > 0.33 && phase < 0.47;
+            let voice: f64 = if phase < 0.3 {
+                let env = (std::f64::consts::PI * phase / 0.3).sin();
+                (1..12)
+                    .map(|k| (2.0 * std::f64::consts::PI * 120.0 * k as f64 * t).sin() / k as f64)
+                    .sum::<f64>()
+                    * env
+                    * 4_000.0
+            } else {
+                0.0
+            };
+            (voice + 400.0 * noise()) as i16
+        })
+        .collect();
+    let wav = vc_audio::encode_wav_bytes(&MonoPcm {
+        sample_rate: rate,
+        samples,
+    })
+    .unwrap();
+    (wav, pause)
+}
+
+fn masked_rms_db(pcm: &MonoPcm, mask: &[bool]) -> f64 {
+    let v: Vec<f64> = pcm
+        .samples
+        .iter()
+        .zip(mask)
+        .filter(|(_, m)| **m)
+        .map(|(s, _)| f64::from(*s))
+        .collect();
+    10.0 * (v.iter().map(|s| s * s).sum::<f64>() / v.len() as f64).log10()
+}
+
+#[tokio::test]
+async fn references_are_cleaned_at_enrollment_unless_the_upload_opts_out() {
+    let api = Api::fake();
+    let consent = api.consent().await;
+    let (upload, pause) = noisy_wav(16_000, 8.0);
+    let uploaded = vc_audio::decode_wav(std::io::Cursor::new(upload.clone())).unwrap();
+    let enroll = |cleanup: Option<&'static str>| {
+        let mut fields = vec![
+            ("consent_id", consent.clone().into_bytes()),
+            ("file", upload.clone()),
+        ];
+        if let Some(c) = cleanup {
+            fields.push(("cleanup", c.as_bytes().to_vec()));
+        }
+        fields
+    };
+    let stored = |r: &Resp| {
+        assert_eq!(
+            r.status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&r.body)
+        );
+        let id = r.json()["id"].as_str().unwrap().parse().unwrap();
+        vc_audio::read_wav_file(&api.data.reference_path(id)).unwrap()
+    };
+
+    // Default: cleaned. The pauses lose most of their noise; the length and rate stay.
+    let r = api.post_multipart("/v1/voices", &enroll(None)).await;
+    let cleaned = stored(&r);
+    assert_eq!(r.json()["reference_cleaned"], true);
+    assert_eq!(cleaned.sample_rate, 16_000);
+    assert_eq!(cleaned.samples.len(), uploaded.samples.len());
+    let drop_db = masked_rms_db(&uploaded, &pause) - masked_rms_db(&cleaned, &pause);
+    assert!(drop_db > 10.0, "pause noise fell by only {drop_db:.1} dB");
+
+    // Opted out: exactly the normalized upload.
+    let r = api
+        .post_multipart("/v1/voices", &enroll(Some("false")))
+        .await;
+    assert_eq!(stored(&r), uploaded);
+    assert_eq!(r.json()["reference_cleaned"], false);
+    let r = api
+        .post_multipart("/v1/voices", &enroll(Some("true")))
+        .await;
+    assert_eq!(stored(&r), cleaned, "cleanup is deterministic");
+
+    let r = api
+        .post_multipart("/v1/voices", &enroll(Some("maybe")))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    // With the service default off, an upload can still opt in.
+    let off = Api::new(
+        Arc::new(FakeBackend::new()),
+        EngineConfig::default(),
+        ApiConfig {
+            reference_cleanup: false,
+            ..ApiConfig::default()
+        },
+    );
+    let consent = off.consent().await;
+    for (cleanup, want) in [(None, false), (Some("true"), true)] {
+        let mut fields = vec![
+            ("consent_id", consent.clone().into_bytes()),
+            ("file", upload.clone()),
+        ];
+        if let Some(c) = cleanup {
+            fields.push(("cleanup", c.as_bytes().to_vec()));
+        }
+        let r = off.post_multipart("/v1/voices", &fields).await;
+        assert_eq!(r.status, StatusCode::CREATED);
+        assert_eq!(r.json()["reference_cleaned"], want);
+        let id = r.json()["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            off.get(&format!("/v1/voices/{id}")).await.json()["reference_cleaned"],
+            want
+        );
+    }
+}
+
+#[tokio::test]
+async fn job_output_is_polished_unless_the_job_opts_out() {
+    let api = Api::fake();
+    let voice = api.voice().await;
+    let mut events = api.engine.subscribe();
+    let text = "One two three four five six seven eight. Nine ten eleven twelve.";
+    let mut audio = Vec::new();
+    for polish in [None, Some(false), Some(true)] {
+        let mut body = json!({ "voice_id": voice, "language": "en", "text": text });
+        if let Some(p) = polish {
+            body["polish"] = json!(p);
+        }
+        let r = api.post_json("/v1/jobs", body).await;
+        assert_eq!(r.status, StatusCode::ACCEPTED);
+        assert_eq!(r.json()["polish"], polish.unwrap_or(true));
+        let job = r.json()["id"].as_str().unwrap().to_owned();
+        api.wait_finished(&mut events, &job).await;
+        assert_eq!(
+            api.get(&format!("/v1/jobs/{job}")).await.json()["polish"],
+            polish.unwrap_or(true)
+        );
+        let a = api.get(&format!("/v1/jobs/{job}/audio")).await;
+        audio.push(vc_audio::decode_wav(std::io::Cursor::new(a.body)).unwrap());
+    }
+    let (default, plain, polished) = (&audio[0], &audio[1], &audio[2]);
+    assert_eq!(default, polished);
+    assert_eq!(
+        polished,
+        &vc_audio::polish(plain, &vc_audio::PolishParams::default())
+    );
+    assert_eq!(polished.samples.len(), plain.samples.len());
+    let lufs = |p: &MonoPcm| {
+        let x: Vec<f64> = p.samples.iter().map(|&s| f64::from(s) / 32768.0).collect();
+        vc_audio::dsp::integrated_loudness(&x, p.sample_rate).unwrap()
+    };
+    let target = vc_audio::PolishParams::default().target_lufs;
+    assert!(
+        (lufs(polished) - target).abs() < 1.0,
+        "{} LUFS",
+        lufs(polished)
+    );
+    assert_ne!(polished, plain);
+
+    let r = api
+        .post_json(
+            "/v1/jobs",
+            json!({ "voice_id": voice, "language": "en", "text": text, "polish": "yes" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+}

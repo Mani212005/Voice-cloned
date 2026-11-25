@@ -189,6 +189,8 @@ fn serve(cfg: Config) -> anyhow::Result<()> {
             config: vc_api::ApiConfig {
                 max_body_bytes: cfg.server.max_body_bytes,
                 max_job_chars: cfg.server.max_job_chars,
+                reference_cleanup: cfg.audio.reference_cleanup,
+                output_polish: cfg.audio.output_polish,
             },
             app_version: env!("CARGO_PKG_VERSION"),
         });

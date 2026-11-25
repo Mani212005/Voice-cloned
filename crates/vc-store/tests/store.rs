@@ -31,6 +31,7 @@ fn voice(store: &Store) -> VoiceId {
         ref_ms: 11_000,
         ref_sha256: "ab".repeat(32),
         created_at_ms: 2,
+        ref_cleaned: true,
     };
     store.insert_voice(&v).unwrap();
     v.id
@@ -48,6 +49,7 @@ fn job(store: &Store, voice: VoiceId, now: i64) -> JobId {
                 text_sha256: "cd".repeat(32),
                 chunks_total: 2,
                 rate: Rate::NATIVE,
+                polish: true,
             },
             now,
         )
@@ -209,6 +211,7 @@ fn voice_in_use_cannot_be_deleted_and_deleted_voice_takes_no_jobs() {
         text_sha256: "00".repeat(32),
         chunks_total: 1,
         rate: Rate::NATIVE,
+        polish: false,
     };
     assert!(matches!(s.insert_job(&new, 7), Err(StoreError::NotFound)));
 }
@@ -243,6 +246,7 @@ fn a_job_keeps_its_rate() {
             text_sha256: "00".repeat(32),
             chunks_total: 1,
             rate,
+            polish: false,
         },
         1,
     )
@@ -271,7 +275,7 @@ fn a_v1_database_is_migrated_and_its_jobs_keep_the_native_rate() {
         let version: i64 = c
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         // A v1 job row (no rate given) reads back at the native rate.
         c.execute(
             "INSERT INTO jobs (id, voice_id, state, language, text, text_sha256, chunks_total,
@@ -299,5 +303,72 @@ fn a_v1_database_is_migrated_and_its_jobs_keep_the_native_rate() {
             .unwrap()
             .iter()
             .all(|r| r.rate == Rate::NATIVE)
+    );
+}
+
+#[test]
+fn a_v2_database_is_migrated_and_its_rows_were_neither_cleaned_nor_polished() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vcd.sqlite3");
+    let (consent_id, voice_id, job_id) = (
+        ConsentId::generate(),
+        VoiceId::generate(),
+        JobId::generate(),
+    );
+    {
+        // A v2 database with rows as a v2 vcd wrote them, without the new columns.
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(include_str!("../src/migrations/0001_init.sql"))
+            .unwrap();
+        c.execute_batch(include_str!("../src/migrations/0002_job_rate.sql"))
+            .unwrap();
+        c.pragma_update(None, "user_version", 2).unwrap();
+        c.execute(
+            "INSERT INTO consents (id, seq, speaker_name, relationship, attestation, languages,
+                                   created_at_ms, prev_hash, record_hash)
+             VALUES (?1, 1, 'Owner', 'self', 'This is my own voice.', 'en', 1, ?2, ?3)",
+            rusqlite::params![consent_id.to_string(), GENESIS_HASH, "11".repeat(32)],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO voices (id, consent_id, name, reference_language, ref_sample_rate,
+                                 ref_ms, ref_sha256, created_at_ms)
+             VALUES (?1, ?2, 'me', 'en', 16000, 11000, ?3, 2)",
+            rusqlite::params![
+                voice_id.to_string(),
+                consent_id.to_string(),
+                "ab".repeat(32)
+            ],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO jobs (id, voice_id, state, language, text, text_sha256, chunks_total,
+                               created_at_ms, rate_milli)
+             VALUES (?1, ?2, 'queued', 'en', 'x', ?3, 1, 1, 1200)",
+            rusqlite::params![job_id.to_string(), voice_id.to_string(), "00".repeat(32)],
+        )
+        .unwrap();
+    }
+    let s = Store::open(&path).unwrap();
+    assert!(!s.get_voice(voice_id).unwrap().ref_cleaned);
+    let j = s.get_job(job_id).unwrap();
+    assert!(!j.polish);
+    assert_eq!(j.rate, Rate::from_f64(1.2).unwrap());
+    // New rows keep what they were given.
+    let v = voice(&s);
+    assert!(s.get_voice(v).unwrap().ref_cleaned);
+    assert!(s.get_job(job(&s, v, 3)).unwrap().polish);
+    drop(s);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = c
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    assert!(
+        c.execute(
+            "UPDATE jobs SET polish = 2 WHERE id = ?1",
+            [job_id.to_string()]
+        )
+        .is_err()
     );
 }

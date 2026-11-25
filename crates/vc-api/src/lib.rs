@@ -5,11 +5,11 @@
 //! GET    /v1/version               app, backend, runtime pin, model hashes, consent chain head
 //! GET    /v1/models                backend capability declaration
 //! POST   /v1/consents              JSON consent record (own voice only in v1)
-//! POST   /v1/voices                multipart: consent_id, name, reference_language, file (WAV)
+//! POST   /v1/voices                multipart: consent_id, name, reference_language, cleanup, file (WAV)
 //! GET    /v1/voices
 //! GET    /v1/voices/{id}
 //! DELETE /v1/voices/{id}           409 voice_in_use while a job uses it
-//! POST   /v1/jobs                  JSON {voice_id, language, text} -> 202 + Location
+//! POST   /v1/jobs                  JSON {voice_id, language, text, rate, polish} -> 202 + Location
 //! GET    /v1/jobs/{id}             state, queue position, progress, timings, peak RSS
 //! GET    /v1/jobs/{id}/audio       final WAV once succeeded
 //! DELETE /v1/jobs/{id}             cancel (kills the engine) or delete an ended job
@@ -40,6 +40,12 @@ pub struct ApiConfig {
     pub max_body_bytes: usize,
     /// Upper bound for a job's text, in characters.
     pub max_job_chars: usize,
+    /// Clean references at enrollment (denoise, then restore a muffled top end) unless the
+    /// upload says `cleanup=false`.
+    pub reference_cleanup: bool,
+    /// Polish job output (de-esser, loudness normalization, peak limiter) unless the job
+    /// says `"polish": false`.
+    pub output_polish: bool,
 }
 
 impl Default for ApiConfig {
@@ -47,6 +53,8 @@ impl Default for ApiConfig {
         Self {
             max_body_bytes: 25_000_000,
             max_job_chars: 2_000,
+            reference_cleanup: true,
+            output_polish: true,
         }
     }
 }
