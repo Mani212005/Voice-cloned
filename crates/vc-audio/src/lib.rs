@@ -8,6 +8,13 @@
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 
+mod cleanup;
+pub mod dsp;
+mod polish;
+
+pub use cleanup::{CleanupParams, clean_reference, hf_tilt_db, resample};
+pub use polish::{PolishParams, polish};
+
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
     #[error("not a readable WAV file: {0}")]

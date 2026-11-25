@@ -11,4 +11,6 @@ workspace = true
 
 [dependencies]
 hound = "3.5.1"
+# RNNoise, pure Rust, weights compiled in; only its denoiser (no CLI, resampler or I/O).
+nnnoiseless = { version = "0.5.2", default-features = false }
 thiserror = "2.0.21"
