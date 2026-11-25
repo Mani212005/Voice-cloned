@@ -12,6 +12,7 @@ pub struct Config {
     pub server: Server,
     pub storage: Storage,
     pub engine: EngineCfg,
+    pub audio: Audio,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -51,6 +52,27 @@ pub struct EngineCfg {
     pub queue_capacity: usize,
     pub inter_chunk_gap_ms: u32,
     pub crash_retries: u32,
+}
+
+/// Sound cleanup around the engine (see `docs/clean-voice.md`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Audio {
+    /// Denoise every new reference at enrollment and restore a muffled top end; an upload
+    /// can opt out with `cleanup=false`. Voices already enrolled are not changed.
+    pub reference_cleanup: bool,
+    /// Finish every job's output (de-esser, loudness to -16 LUFS, peak limiter); a job can
+    /// opt out with `"polish": false`.
+    pub output_polish: bool,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Self {
+            reference_cleanup: true,
+            output_polish: true,
+        }
+    }
 }
 
 impl Default for Server {
@@ -146,6 +168,8 @@ mod tests {
         assert_eq!(c.server.listen.to_string(), "127.0.0.1:8740");
         assert_eq!(c.storage.output_ttl_hours, 24);
         assert!(c.engine.warm);
+        assert!(c.audio.reference_cleanup);
+        assert!(c.audio.output_polish);
     }
 
     #[test]
@@ -155,6 +179,10 @@ mod tests {
         assert!(!c.engine.warm);
         assert_eq!(c.engine.nice, 10);
         assert!(toml::from_str::<Config>("[engine]\nthreadz = 4\n").is_err());
+        let c: Config = toml::from_str("[audio]\noutput_polish = false\n").unwrap();
+        assert!(!c.audio.output_polish);
+        assert!(c.audio.reference_cleanup);
+        assert!(toml::from_str::<Config>("[audio]\ndenoise = true\n").is_err());
         assert!(toml::from_str::<Config>("[nope]\n").is_err());
     }
 

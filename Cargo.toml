@@ -23,3 +23,14 @@ unwrap_used = "deny"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The audio DSP (reference cleanup, polish, time-stretch) runs in the API and engine tests;
+# unoptimized it makes them several times slower.
+[profile.dev.package.vc-audio]
+opt-level = 3
+
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3

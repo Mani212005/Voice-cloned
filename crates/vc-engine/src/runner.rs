@@ -146,8 +146,17 @@ async fn run(
 
     // The pause between chunks scales with the rate, like the speech around it.
     let gap_ms = (f64::from(ctx.config.inter_chunk_gap_ms) / job.rate.as_f64()).round() as u32;
-    let joined =
+    let mut joined =
         vc_audio::concat_with_gap(&outputs, gap_ms).map_err(|_| ErrorCode::EngineOutputInvalid)?;
+    // The polish measures loudness over the whole narration, so it runs on the joined
+    // output rather than per chunk: every chunk gets the same gain.
+    if job.polish {
+        joined = tokio::task::spawn_blocking(move || {
+            vc_audio::polish(&joined, &vc_audio::PolishParams::default())
+        })
+        .await
+        .map_err(|e| internal("polish task", &e))?;
+    }
     let wav = vc_audio::encode_wav_bytes(&joined).map_err(|e| internal("encode output", &e))?;
     vc_store::files::write_private(&ctx.data.output_path(job_id), &wav)
         .map_err(|e| internal("write output", &e))?;

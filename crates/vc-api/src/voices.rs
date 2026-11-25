@@ -16,6 +16,7 @@ struct Upload {
     consent_id: Option<String>,
     name: Option<String>,
     reference_language: Option<String>,
+    cleanup: Option<String>,
     file: Option<Vec<u8>>,
 }
 
@@ -33,6 +34,7 @@ async fn read_upload(mut mp: Multipart) -> Result<Upload, Problem> {
             "consent_id" => up.consent_id.is_some(),
             "name" => up.name.is_some(),
             "reference_language" => up.reference_language.is_some(),
+            "cleanup" => up.cleanup.is_some(),
             other => return Err(Problem::invalid(format!("unknown field {other:?}"))),
         };
         if slot_taken {
@@ -52,6 +54,7 @@ async fn read_upload(mut mp: Multipart) -> Result<Upload, Problem> {
             "file" => up.file = Some(bytes.to_vec()),
             "consent_id" => up.consent_id = Some(text()?),
             "name" => up.name = Some(text()?),
+            "cleanup" => up.cleanup = Some(text()?),
             _ => up.reference_language = Some(text()?),
         }
     }
@@ -109,6 +112,12 @@ pub async fn create(
             "the consent does not cover the reference language",
         ));
     }
+    let cleanup = match up.cleanup.as_deref().map(str::trim) {
+        None => state.config.reference_cleanup,
+        Some("true") => true,
+        Some("false") => false,
+        Some(_) => return Err(Problem::invalid("cleanup must be true or false")),
+    };
     let bytes = up
         .file
         .ok_or_else(|| Problem::invalid("file (a WAV reference) is required"))?;
@@ -123,7 +132,21 @@ pub async fn create(
         },
     )
     .map_err(|e| Problem::new(ErrorCode::ReferenceInvalid, e.to_string()))?;
-    // Only the normalized mono reference is kept; the upload itself is dropped here.
+    let pcm = if cleanup {
+        // About a second of CPU for a 15 s reference: keep it off the async workers.
+        tokio::task::spawn_blocking(move || {
+            vc_audio::clean_reference(&pcm, &vc_audio::CleanupParams::default())
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("reference cleanup task: {e}");
+            Problem::internal()
+        })?
+    } else {
+        pcm
+    };
+    // Only the normalized (and, with cleanup, cleaned) mono reference is kept; the upload
+    // itself is dropped here.
     let normalized = vc_audio::encode_wav_bytes(&pcm).map_err(|_| Problem::internal())?;
 
     let row = VoiceRow {
@@ -135,6 +158,7 @@ pub async fn create(
         ref_ms: pcm.duration_ms(),
         ref_sha256: hex::encode(Sha256::digest(&normalized)),
         created_at_ms: ctx.clock.now_ms(),
+        ref_cleaned: cleanup,
     };
     let dir = ctx.data.voice_dir(row.id);
     let written = vc_store::files::private_dir(&dir).and_then(|()| {
@@ -149,7 +173,7 @@ pub async fn create(
         let _ = vc_store::files::remove_tree(&dir);
         return Err(store_err(e, "voice"));
     }
-    tracing::info!(voice_id = %row.id, ref_ms = row.ref_ms, "voice enrolled");
+    tracing::info!(voice_id = %row.id, ref_ms = row.ref_ms, cleaned = cleanup, "voice enrolled");
     // The new voice is the one most likely to be used next.
     state.engine.prepare(row.id).await;
     Ok((StatusCode::CREATED, Json(row.into())))
